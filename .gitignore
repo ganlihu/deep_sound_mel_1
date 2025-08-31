@@ -1,0 +1,25 @@
+# 大文件类型（永久排除）
+*.pkl
+*.pack
+*.zip
+*.tar.gz
+*.h5
+*.pt
+*.bin
+*.csv.bz2
+
+# 缓存/备份目录（永久排除）
+data/cache/
+.git_backup/
+backup/
+temp/
+tmp/
+
+# 环境/日志/IDE文件（可选，建议加）
+venv/
+env/
+*.log
+__pycache__/
+.pytest_cache/
+.idea/
+.vscode/

@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: chewbite_fusion
+Version: 0.1.0
+Summary: Audio and movement events detection.
+Author: sinc(i)
+License: MIT
+License-File: LICENSE
+Requires-Dist: pandas==1.5.3
+Requires-Dist: plotly==5.14.0
+Requires-Dist: scipy==1.10.1
+Requires-Dist: notebook==6.5.3
+Requires-Dist: scikit-learn==1.2.2
+Requires-Dist: librosa==0.10.0
+Requires-Dist: more_itertools==9.1.0
+Requires-Dist: yaer@ git+https://github.com/arielrossanigo/yaer.git#egg=yaer
+Requires-Dist: tensorflow==2.12.0
+Requires-Dist: sed_eval==0.2.1
+Requires-Dist: xgboost==1.7.5
+Requires-Dist: seaborn==0.12.2
+Dynamic: author
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: summary

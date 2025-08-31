@@ -1,0 +1,9 @@
+LICENSE
+README.md
+setup.py
+src/chewbite_fusion/__init__.py
+src/chewbite_fusion.egg-info/PKG-INFO
+src/chewbite_fusion.egg-info/SOURCES.txt
+src/chewbite_fusion.egg-info/dependency_links.txt
+src/chewbite_fusion.egg-info/requires.txt
+src/chewbite_fusion.egg-info/top_level.txt
