@@ -133,3 +133,90 @@ def resample_imu_signal(data, signal_duration_sec, frequency, interpolation_kind
         df[col] = interpolator(df.timestamp_relative.values)
 
     return df
+
+
+
+# 现有代码结束后（如 resample_imu_signal 函数之后）
+
+import numpy as np
+import pandas as pd
+import traceback
+from functools import wraps
+
+class NaNDetector:
+    """NaN检测工具，可追踪NaN出现的具体过程"""
+    
+    def __init__(self, verbose=True):
+        self.verbose = verbose
+        self.process_history = []  # 记录处理过程
+    
+    def log_process(self, process_name):
+        """记录当前处理过程"""
+        self.process_history.append(process_name)
+        if self.verbose:
+            print(f"[处理过程] {process_name}")
+    
+    def check_nan(self, data, process_name=None):
+        """检查数据中是否存在NaN"""
+        if process_name:
+            self.log_process(process_name)
+        
+        # 检查numpy数组
+        if isinstance(data, np.ndarray):
+            if np.isnan(data).any():
+                self._raise_nan_error(f" numpy数组中存在NaN，形状: {data.shape}")
+        
+        # 检查pandas数据框/系列
+        elif isinstance(data, (pd.DataFrame, pd.Series)):
+            nan_count = data.isna().sum().sum()
+            if nan_count > 0:
+                self._raise_nan_error(f" pandas对象中存在{nan_count}个NaN")
+        
+        # 检查列表或嵌套列表
+        elif isinstance(data, list):
+            try:
+                arr = np.array(data)
+                if np.isnan(arr).any():
+                    self._raise_nan_error(f" 列表中存在NaN，长度: {len(data)}")
+            except TypeError:
+                pass  # 非数值列表不检查
+        
+        return data  # 允许链式调用
+    
+    def _raise_nan_error(self, msg):
+        """抛出包含处理历史的NaN错误"""
+        error_msg = "\n".join([
+            "检测到NaN值！",
+            f"出现位置: {msg}",
+            "处理过程链: " + " -> ".join(self.process_history)
+        ])
+        raise ValueError(error_msg)
+    
+    @staticmethod
+    def wrap_process(process_func):
+        """装饰器：包装处理函数，自动检测输入输出是否含NaN"""
+        @wraps(process_func)
+        def wrapper(*args, **kwargs):
+            detector = NaNDetector(verbose=False)
+            process_name = process_func.__name__
+            
+            # 检查输入参数
+            for i, arg in enumerate(args):
+                try:
+                    detector.check_nan(arg, process_name=f"{process_name} - 输入参数{i}")
+                except ValueError:
+                    traceback.print_exc()
+                    raise
+            
+            # 执行处理函数
+            result = process_func(*args, **kwargs)
+            
+            # 检查输出结果
+            try:
+                detector.check_nan(result, process_name=f"{process_name} - 输出结果")
+            except ValueError:
+                traceback.print_exc()
+                raise
+            
+            return result
+        return wrapper

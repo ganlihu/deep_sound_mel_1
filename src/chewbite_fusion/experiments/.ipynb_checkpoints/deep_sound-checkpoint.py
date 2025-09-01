@@ -1,5 +1,5 @@
 import logging
-
+import tensorflow as tf  # 新增：导入TensorFlow
 from chewbite_fusion.models.deep_sound import DeepSound
 from chewbite_fusion.experiments.settings import random_seed
 from chewbite_fusion.data.make_dataset import main
@@ -15,17 +15,20 @@ logger = logging.getLogger('yaer')
 def get_model_instance(variable_params):
     return DeepSound(input_size=1800,
                      output_size=4,
-                     n_epochs=1,
+                     n_epochs=1500,
                      batch_size=10,
                      training_reshape=True,
                      set_sample_weights=True,
-                     feature_scaling=False)
+                     feature_scaling=True)
 
 
 @experiment()
 def deep_sound():
     """ Experiment with Deep Sound architecture.
     """
+    # 启用数值检查（新增此行）
+    # tf.debugging.enable_check_numerics()  # 放在这里！
+    
     window_width = 0.3
     window_overlap = 0.5
     X, y = main(window_width=window_width,

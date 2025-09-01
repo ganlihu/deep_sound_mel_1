@@ -6,15 +6,13 @@
 *.h5
 *.pt
 *.bin
-*.csv.bz2
-
+*.csv.bz2 
 # 缓存/备份目录（永久排除）
 data/cache/
 .git_backup/
 backup/
 temp/
 tmp/
-
 # 环境/日志/IDE文件（可选，建议加）
 venv/
 env/
