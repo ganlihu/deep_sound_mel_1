@@ -84,16 +84,19 @@ class DeepSoundBaseRNN:
         self.weights_ = None  # 用于存储初始权重
 
     def fit(self, X, y):
-        # 打印原始X的长度和类型（调试用）
+        # 1. 打印原始数据信息（关键：确认输入有42个样本）
+        print("="*60)
+        print("【原始数据信息】")
         print("Original X length:", len(X))
         print("Original X[0] type:", type(X[0]))
         print("Original X[0] length:", len(X[0]) if isinstance(X[0], (list, np.ndarray)) else "N/A")
+        print("="*60)
         
         ''' 基于输入数据训练网络 '''
         self.classes_ = list(set(np.concatenate(y)))
         self.padding_class = len(self.classes_)
 
-        # 对输入序列进行填充，统一长度
+        # 2. 对输入序列进行填充，统一长度
         X_pad = []
         for i in X:
             X_pad.append(
@@ -101,73 +104,75 @@ class DeepSoundBaseRNN:
                                                            padding='post',
                                                            value=-100.0,
                                                            dtype=float))
-        print("X_pad length:", len(X_pad))  # 调试：打印填充后的样本数
+        print(f"填充后样本数: {len(X_pad)}")  # 这里应该是1（因为原始X是[list(42个样本)]）
             
-        # 对标签序列进行填充
+        # 3. 对标签序列进行填充
         y = keras.preprocessing.sequence.pad_sequences(
             y,
             padding='post',
             value=self.padding_class,
             dtype=object)
 
-        # 转换为数组并指定数据类型
+        # 4. 转换为数组并指定数据类型
         X = np.asarray(X_pad).astype('float32')
         y = np.asarray(y).astype('int32')  # 标签用int32适配稀疏交叉熵
 
-        # 检查标签有效性
+        # 5. 核心修复：正确处理维度，保留42个样本
+        print(f"\n转换后X形状: {X.shape}")  # 此时是(1, 42, 835, 1800, 1)
+        if X.shape[0] == 1:
+            X = np.squeeze(X, axis=0)  # 去除第一个冗余维度，得到(42, 835, 1800, 1)
+        print(f"去除冗余维度后X形状: {X.shape}")  # 预期：(42, 835, 1800, 1)
+        print(f"当前样本数: {X.shape[0]}")  # 关键：确认是42个样本
+
+        # 6. 检查数据有效性
+        print(f"\n标签形状: {y.shape}")  # 预期：(42, 835)
         print("标签最小值:", y.min())
         print("标签最大值:", y.max())
-        print("标签是否含NaN:", np.isnan(y).any())  # 检查标签NaN
+        print("标签是否含NaN:", np.isnan(y).any())
+        print(f"X含NaN: {np.isnan(X).any()}, X含Inf: {np.isinf(X).any()}")
         
-        # 检查输入数据异常值
-        print("After padding and converting to array:")
-        print(f"X has NaN: {np.isnan(X).any()}")
-        print(f"X has Inf: {np.isinf(X).any()}")
+        # 7. 准备监控用的样本批次（取前5个样本，而非只取1个）
+        monitor_batch = X[:min(self.batch_size, X.shape[0])]  # 取前5个样本
+        print(f"监控批次形状: {monitor_batch.shape}")  # 预期：(5, 835, 1800, 1)
         
-        # 打印数据形状
-        print("X shape:", X.shape)
-        print("y shape:", y.shape)
-        
-        # 准备监控用的样本批次（取第一个批次）
-        monitor_batch = X[:self.batch_size] if len(X) >= self.batch_size else X
-        
-        # 递归获取所有层的完整名称（修复复杂层结构的命名问题）
+        # 8. 递归获取所有层的完整名称（修复监控层名称错误）
         print("\n===== 模型所有层完整名称 =====")
         all_layer_names = []
         def get_full_layer_names(layer, parent_name=""):
             full_name = f"{parent_name}/{layer.name}" if parent_name else layer.name
             all_layer_names.append(full_name)
             print(full_name)
-            # 处理包含子层的结构（如Sequential、TimeDistributed）
             if hasattr(layer, 'layers'):
                 for sub_layer in layer.layers:
                     get_full_layer_names(sub_layer, full_name)
-            # 处理Bidirectional层的内部层
             if isinstance(layer, layers.Bidirectional):
                 get_full_layer_names(layer.layer, full_name)
         for layer in self.model.layers:
             get_full_layer_names(layer)
         print("===========================\n")
         
-        # 修正监控层名称（匹配实际层结构）
+        # 9. 修正监控层名称（匹配实际模型结构，从上面打印的名称中复制）
         monitor_layer_names = [
             'time_distributed_cnn/cnn_subnetwork/conv1d_1',
             'time_distributed_cnn/cnn_subnetwork/conv1d_2',
-            'time_distributed_cnn/cnn_subnetwork/conv1d_3',
-            'time_distributed_cnn/cnn_subnetwork/conv1d_4',
-            'time_distributed_cnn/cnn_subnetwork/conv1d_5',
-            'time_distributed_cnn/cnn_subnetwork/conv1d_6',
             'time_distributed_cnn/cnn_subnetwork/max_pooling1d',
             'bidirectional_gru',
             'time_distributed_ffn/ffn_subnetwork/ffn_output'
         ]
         
-        # 定义训练回调
+        # 10. 动态调整验证集（样本数≥5时才用0.2，避免报错）
+        use_validation = X.shape[0] >= 5
+        validation_split = 0.2 if use_validation else 0.0
+        monitor_loss = 'val_loss' if use_validation else 'loss'
+        monitor_acc = 'val_accuracy' if use_validation else 'accuracy'
+        print(f"是否使用验证集: {use_validation}, 验证集比例: {validation_split}")
+        
+        # 11. 定义训练回调
         model_callbacks = [
-            tf.keras.callbacks.EarlyStopping(patience=50, restore_best_weights=True),
+            tf.keras.callbacks.EarlyStopping(patience=50, restore_best_weights=True, monitor=monitor_loss),
             tf.keras.callbacks.ModelCheckpoint(
                 filepath=os.path.join(self.model_save_path, "best_model.h5"),
-                monitor='val_accuracy',
+                monitor=monitor_acc,
                 save_best_only=True,
                 verbose=1
             ),
@@ -176,65 +181,46 @@ class DeepSoundBaseRNN:
                 layer_names=monitor_layer_names,
                 sample_batch=monitor_batch
             ),
-            tf.keras.callbacks.ReduceLROnPlateau(  # 学习率自动调整
-                monitor='val_loss', factor=0.5, patience=20, min_lr=1e-8, verbose=1
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor=monitor_loss, factor=0.5, patience=20, min_lr=1e-8, verbose=1
             )
         ]
 
-        # 计算样本权重（处理类别不平衡）
+        # 12. 计算样本权重（处理类别不平衡）
         sample_weights = None
         if self.set_sample_weights:
             sample_weights = self._get_samples_weights(y)
 
-        # 调整输入维度（去除冗余的第0维）
-        X = np.squeeze(X, axis=0)
-        print("X shape after squeezing:", X.shape)
-        
-        # 再次检查异常值
-        print("After squeezing:")
-        print(f"X has NaN: {np.isnan(X).any()}")
-        print(f"X has Inf: {np.isinf(X).any()}")
-
-        # 处理异常值（替换NaN和Inf）
+        # 13. 处理异常值
         X = np.nan_to_num(
             X, 
             nan=0.0, 
-            posinf=np.max(X[~np.isinf(X)]), 
-            neginf=np.min(X[~np.isinf(X)])
+            posinf=np.max(X[~np.isinf(X)]) if np.any(~np.isinf(X)) else 0.0,
+            neginf=np.min(X[~np.isinf(X)]) if np.any(~np.isinf(X)) else 0.0
         )
         
-        # 移除多余的通道维度添加（关键修复！）
-        print("X shape after processing:", X.shape)
-        
-        # 检查输入形状与模型匹配性
-        input_shape = self.model.input_shape[1:]
-        actual_shape = X.shape[1:]
-        print(f"模型预期输入形状: {input_shape}, 实际输入形状: {actual_shape}")
-        if actual_shape != input_shape:
-            raise ValueError(f"输入形状不匹配！模型预期{input_shape}，实际{actual_shape}")
-        
-        # 特征缩放（与预测保持一致）
+        # 14. 特征缩放
         if self.feature_scaling:
             X = (X + 1.0) * 100
-            print("缩放后 X训练 统计：", np.min(X), np.max(X), np.mean(X))
+            print(f"\n缩放后X统计: min={np.min(X):.2f}, max={np.max(X):.2f}, mean={np.mean(X):.2f}")
         
-        # 数据统计信息（含异常值检查）
-        print("X 数据统计（处理后）:")
-        print(f"最小值: {np.min(X)}")
-        print(f"最大值: {np.max(X)}")
-        print(f"均值: {np.mean(X)}")
-        print(f"标准差: {np.std(X)}")
-        print(f"是否含NaN: {np.isnan(X).any()}")
-        print(f"是否含Inf: {np.isinf(X).any()}")
+        # 15. 检查输入形状与模型匹配性
+        input_shape = self.model.input_shape[1:]  # 模型输入：(835, 1800, 1)
+        actual_shape = X.shape[1:]
+        print(f"\n模型预期输入形状: {input_shape}")
+        print(f"实际输入形状: {actual_shape}")
+        if actual_shape != input_shape:
+            raise ValueError(f"输入形状不匹配！预期{input_shape}，实际{actual_shape}")
         
-        # 模型训练
+        # 16. 模型训练（使用42个样本，而非1个）
+        print(f"\n【开始训练】样本数: {X.shape[0]}, 批次大小: {self.batch_size}")
         self.model.fit(
-            x=X,
-            y=y,
+            x=X,  # 形状：(42, 835, 1800, 1)，42个样本
+            y=y,  # 形状：(42, 835)，与样本数匹配
             epochs=self.n_epochs,
             verbose=1,
             batch_size=self.batch_size,
-            validation_split=0.2,
+            validation_split=validation_split,  # 42个样本可以划分0.2验证集（8个）
             shuffle=True,
             sample_weight=sample_weights,
             callbacks=model_callbacks
@@ -252,43 +238,33 @@ class DeepSoundBaseRNN:
 
         X = np.asarray(X_pad).astype('float32')
         
-        # 检查预测数据异常值
-        print("Predict: After padding and converting to array:")
-        print(f"X has NaN: {np.isnan(X).any()}")
-        print(f"X has Inf: {np.isinf(X).any()}")
-        print("X shape after padding:", X.shape)  
-
-        # 调整维度（与训练处理一致）
-        X = np.squeeze(X, axis=0)
-        print("X shape after squeezing:", X.shape)
+        # 处理维度（与训练一致）
+        if X.shape[0] == 1:
+            X = np.squeeze(X, axis=0)
+        print(f"预测-处理后X形状: {X.shape}, 样本数: {X.shape[0]}")
         
         # 检查异常值
-        print("Predict: After squeezing:")
-        print(f"X has NaN: {np.isnan(X).any()}")
-        print(f"X has Inf: {np.isinf(X).any()}")
-        
-        # 移除多余的通道维度添加（关键修复！）
-        print("X shape after processing:", X.shape)
+        print(f"Predict: X has NaN: {np.isnan(X).any()}, X has Inf: {np.isinf(X).any()}")
         
         # 处理异常值
         X = np.nan_to_num(
             X, 
             nan=0.0, 
-            posinf=np.max(X[~np.isinf(X)]), 
-            neginf=np.min(X[~np.isinf(X)])
+            posinf=np.max(X[~np.isinf(X)]) if np.any(~np.isinf(X)) else 0.0,
+            neginf=np.min(X[~np.isinf(X)]) if np.any(~np.isinf(X)) else 0.0
         )
         
-        # 特征缩放（与训练保持一致）
+        # 特征缩放
         if self.feature_scaling:
             X = (X + 1.0) * 100
-            print("缩放后 X测试 统计：", np.min(X), np.max(X), np.mean(X))
+            print("Predict: 缩放后X统计：", np.min(X), np.max(X), np.mean(X))
         
         # 模型预测
-        y_pred = self.model.predict(X).argmax(axis=-1)
+        y_pred = self.model.predict(X, verbose=0).argmax(axis=-1)
         return y_pred
 
     def predict_proba(self, X):
-        # 预测概率（与predict逻辑保持一致的预处理）
+        # 预测概率（与predict逻辑保持一致）
         X_pad = []
         for i in X:
             X_pad.append(
@@ -298,12 +274,13 @@ class DeepSoundBaseRNN:
                                                            dtype=float))
 
         X = np.asarray(X_pad).astype('float32')
-        X = np.squeeze(X, axis=0)  # 移除冗余维度
+        if X.shape[0] == 1:
+            X = np.squeeze(X, axis=0)
         
         if self.feature_scaling:
             X = (X + 1.0) * 100
 
-        y_pred = self.model.predict(X)
+        y_pred = self.model.predict(X, verbose=0)
         return y_pred
 
     def _get_samples_weights(self, y):
@@ -314,7 +291,7 @@ class DeepSoundBaseRNN:
         counts = np.array(counts)
         if np.any(counts == 0):
             print("警告：存在样本数为0的类别！")
-            counts = np.maximum(counts, 1)  # 避免除零错误
+            counts = np.maximum(counts, 1)
         
         # 计算权重（基于反比频率）
         class_weight = counts[:-1].max() / counts  # 排除填充类别
@@ -336,10 +313,9 @@ class DeepSoundBaseRNN:
             print(f"类别 {cls} ({cls_type}): 样本数={cnt}, 权重={weight:.4f}")
         print("=======================\n")
 
-        # 转换为字典格式并生成样本权重矩阵
-        class_weight_dict = {cls_num: weight for cls_num, weight in enumerate(class_weight)}
+        # 生成样本权重矩阵
         sample_weight = np.zeros_like(y, dtype=float)
-        for class_num, weight in class_weight_dict.items():
+        for class_num, weight in enumerate(class_weight):
             sample_weight[y == class_num] = weight
 
         return sample_weight
@@ -377,13 +353,13 @@ class DeepSound(DeepSoundBaseRNN):
 
         # 定义CNN子网络（用于局部特征提取）
         layers_config = [
-            (32, 18, 3, activations.relu),  # (filters, kernel_size, strides, activation)
+            (32, 18, 3, activations.relu),
             (32, 9, 1, activations.relu),
             (128, 3, 1, activations.relu)
         ]
 
         cnn = Sequential(name='cnn_subnetwork')
-        cnn.add(layers.Rescaling(scale=1.0, name='input_rescaling'))  # 输入缩放层
+        cnn.add(layers.Rescaling(scale=1.0, name='input_rescaling'))
 
         for ix_l, layer in enumerate(layers_config):
             # 第一组卷积
@@ -406,13 +382,12 @@ class DeepSound(DeepSoundBaseRNN):
                 data_format=self.data_format,
                 name=f'conv1d_{ix_l*2 + 2}'
             ))
-            # 除最后一层外添加Dropout
             if ix_l < (len(layers_config) - 1):
                 cnn.add(layers.Dropout(rate=0.2, name=f'dropout_{ix_l + 1}'))
 
-        cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))  # 降采样
-        cnn.add(layers.Flatten(name='flatten'))  # 展平特征
-        cnn.add(layers.Dropout(rate=0.1, name='cnn_output_dropout'))  # 输出Dropout
+        cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
+        cnn.add(layers.Flatten(name='flatten'))
+        cnn.add(layers.Dropout(rate=0.1, name='cnn_output_dropout'))
 
         # 定义FFN子网络（用于分类）
         ffn = Sequential(name='ffn_subnetwork')
@@ -422,19 +397,18 @@ class DeepSound(DeepSoundBaseRNN):
         ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_2'))
         ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
 
-        # 定义完整模型（时序特征提取+分类）
-        # 输入形状：(time_steps, input_size, 1)
+        # 定义完整模型
         model = Sequential([
             layers.InputLayer(input_shape=(self.time_steps, input_size, 1), name='input1'),
-            layers.TimeDistributed(cnn, name='time_distributed_cnn'),  # 对每个时间步应用CNN
+            layers.TimeDistributed(cnn, name='time_distributed_cnn'),
             layers.Bidirectional(
                 layers.GRU(128, activation="tanh", return_sequences=True, dropout=0.2),
                 name='bidirectional_gru'
             ),
-            layers.TimeDistributed(ffn, name='time_distributed_ffn')  # 对每个时间步应用FFN
+            layers.TimeDistributed(ffn, name='time_distributed_ffn')
         ])
 
-        # 编译模型（带梯度裁剪和学习率调整）
+        # 编译模型
         model.compile(
             optimizer=Adam(learning_rate=1e-6, clipnorm=1.0),
             loss='sparse_categorical_crossentropy',
@@ -442,6 +416,6 @@ class DeepSound(DeepSoundBaseRNN):
         )
 
         self.model = model
-        self.weights_ = copy.deepcopy(model.get_weights())  # 保存初始权重
+        self.weights_ = copy.deepcopy(model.get_weights())
         print("模型初始化完成，结构如下：")
         self.model.summary()
