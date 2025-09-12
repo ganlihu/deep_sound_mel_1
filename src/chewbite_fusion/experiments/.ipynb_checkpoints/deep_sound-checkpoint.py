@@ -15,7 +15,7 @@ logger = logging.getLogger('yaer')
 def get_model_instance(variable_params):
     return DeepSound(input_size=1800,
                      output_size=4,
-                     n_epochs=1500,
+                     n_epochs=10,
                      batch_size=5,
                      training_reshape=True,
                      set_sample_weights=True,

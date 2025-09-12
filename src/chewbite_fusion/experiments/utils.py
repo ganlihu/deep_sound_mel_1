@@ -32,7 +32,7 @@ def get_experiment_results(experiment_path, full=False):
 
     fold_metrics = []
 
-    unique_labels = ['chew','bite', 'chew-bite']
+    unique_labels = ['chew','bite','chew-bite']
 
     for _, fold in folds.items():
         file_list = []

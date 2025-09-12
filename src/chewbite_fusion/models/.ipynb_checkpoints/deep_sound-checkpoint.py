@@ -94,7 +94,7 @@ class ResourceLogger:
             'available_gb': available_mem_gb  # 初始可用内存
         }
         self.log(f"总内存: {total_mem_gb:.2f} GB")
-        self.log(f"初始可用内存: {available_mem_gb:.2f} GB")  # 新增：显示初始可用内存
+        self.log(f"初始可用内存: {available_mem_gb:.2f} GB")
         
         # GPU信息
         self.system_info['gpus'] = []
@@ -105,18 +105,18 @@ class ResourceLogger:
                 if isinstance(gpu_name, bytes):
                     gpu_name = gpu_name.decode('utf-8')
                 total_vram_gb = info.total / (1024**3)
-                available_vram_gb = info.free / (1024**3)  # 新增：计算初始可用显存
+                available_vram_gb = info.free / (1024**3)
                 
                 gpu_info = {
                     'index': i,
                     'name': gpu_name,
                     'total_vram_gb': total_vram_gb,
-                    'available_vram_gb': available_vram_gb  # 新增：记录初始可用显存
+                    'available_vram_gb': available_vram_gb
                 }
                 self.system_info['gpus'].append(gpu_info)
                 self.log(f"GPU {i}: {gpu_name}")
                 self.log(f"  总显存: {total_vram_gb:.2f} GB")
-                self.log(f"  初始可用显存: {available_vram_gb:.2f} GB")  # 新增：显示初始可用显存
+                self.log(f"  初始可用显存: {available_vram_gb:.2f} GB")
                 
                 # 初始化GPU内存峰值记录
                 self.memory_peaks['gpu_memory_used'][i] = 0.0
@@ -168,7 +168,7 @@ class ResourceLogger:
         self.log(f"CPU内存状态:")
         self.log(f"  总内存: {total_mem_gb:.2f} GB")
         self.log(f"  已使用: {used_mem_gb:.2f} GB ({mem.percent}%)")
-        self.log(f"  剩余可用: {available_mem_gb:.2f} GB")  # 突出显示可用内存
+        self.log(f"  剩余可用: {available_mem_gb:.2f} GB")
         self.log(f"  使用峰值: {self.memory_peaks['cpu_memory_used']:.2f} GB")
         
         # 进程内存使用
@@ -181,7 +181,7 @@ class ResourceLogger:
                     mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
                     used_vram_gb = mem_info.used / (1024**3)
                     total_vram_gb = mem_info.total / (1024**3)
-                    available_vram_gb = mem_info.free / (1024**3)  # 计算可用显存
+                    available_vram_gb = mem_info.free / (1024**3)
                     gpu_name = pynvml.nvmlDeviceGetName(handle)
                     if isinstance(gpu_name, bytes):
                         gpu_name = gpu_name.decode('utf-8')
@@ -189,7 +189,7 @@ class ResourceLogger:
                     self.log(f"GPU {i} ({gpu_name}) 显存状态:")
                     self.log(f"  总显存: {total_vram_gb:.2f} GB")
                     self.log(f"  已使用: {used_vram_gb:.2f} GB ({mem_info.used/mem_info.total*100:.1f}%)")
-                    self.log(f"  剩余可用: {available_vram_gb:.2f} GB")  # 突出显示可用显存
+                    self.log(f"  剩余可用: {available_vram_gb:.2f} GB")
                     self.log(f"  使用峰值: {self.memory_peaks['gpu_memory_used'][i]:.2f} GB")
                 except pynvml.NVMLError as e:
                     self.log(f"获取GPU {i} 内存信息失败: {e}")
@@ -243,7 +243,7 @@ class GPUUsageMonitor(keras.callbacks.Callback):
         self.resource_logger.log(f"内存状态: "
                                f"已用 {mem.used / (1024**3):.2f} GB / "
                                f"总 {mem.total / (1024**3):.2f} GB / "
-                               f"可用 {mem.available / (1024**3):.2f} GB ({100 - mem.percent}%)")  # 显示可用内存
+                               f"可用 {mem.available / (1024**3):.2f} GB ({100 - mem.percent}%)")
         
         # 记录GPU使用情况（突出可用显存）
         if pynvml_available and self.resource_logger.initialized:
@@ -254,14 +254,14 @@ class GPUUsageMonitor(keras.callbacks.Callback):
                     temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
                     used_vram = mem_info.used / (1024**3)
                     total_vram = mem_info.total / (1024**3)
-                    available_vram = mem_info.free / (1024**3)  # 计算可用显存
+                    available_vram = mem_info.free / (1024**3)
                     
                     self.resource_logger.log(
                         f"GPU {i} 状态: "
                         f"使用率 {util.gpu}%, "
                         f"显存(已用/总/可用): {used_vram:.2f} / {total_vram:.2f} / {available_vram:.2f} GB, "
                         f"温度 {temp}°C"
-                    )  # 显示可用显存
+                    )
                 except pynvml.NVMLError as e:
                     self.resource_logger.log(f"GPU {i} 信息获取失败: {e}")
         
@@ -281,7 +281,6 @@ class GPUUsageMonitor(keras.callbacks.Callback):
         self.resource_logger.record_memory_summary()
 
 
-# 以下代码保持不变（LayerOutputMonitor、GradientMonitor、DeepSoundBaseRNN等）
 class LayerOutputMonitor(keras.callbacks.Callback):
     """监控模型中间层输出，检测NaN/Inf等异常值"""
     def __init__(self, model, layer_names, sample_batch=None, resource_logger=None):
@@ -339,16 +338,32 @@ class LayerOutputMonitor(keras.callbacks.Callback):
 
 
 class GradientMonitor(keras.callbacks.Callback):
-    """监控梯度范数，防止梯度爆炸"""
-    def __init__(self, model, resource_logger=None):
+    """监控梯度范数，防止梯度爆炸（适配TensorFlow 2.x API，修复梯度获取错误）"""
+    def __init__(self, model, sample_batch, resource_logger=None):
         super().__init__()
         self.model = model
+        self.sample_batch = sample_batch  # 使用固定样本批次计算梯度，避免动态获取问题
         self.resource_logger = resource_logger or ResourceLogger()
+        # 获取模型损失函数
+        self.loss_fn = self.model.loss
+        if isinstance(self.loss_fn, str):
+            self.loss_fn = keras.losses.get(self.loss_fn)
+        # 分离输入和标签
+        self.x_batch, self.y_batch = sample_batch  # 期望sample_batch是(x, y)元组
 
     def on_train_batch_end(self, batch, logs=None):
-        if batch % 10 == 0:
+        if batch % 10 == 0:  # 每10个批次监控一次
             try:
-                grads = self.model.optimizer.get_gradients(logs['loss'], self.model.trainable_weights)
+                # 使用GradientTape计算梯度（TensorFlow 2.x标准方式）
+                with tf.GradientTape() as tape:
+                    # 前向传播获取预测值
+                    y_pred = self.model(self.x_batch, training=True)
+                    # 计算损失
+                    loss = self.loss_fn(self.y_batch, y_pred)
+                
+                # 计算梯度
+                grads = tape.gradient(loss, self.model.trainable_weights)
+                
                 # 检查梯度是否有NaN/Inf
                 for i, g in enumerate(grads):
                     if g is not None:
@@ -358,8 +373,10 @@ class GradientMonitor(keras.callbacks.Callback):
                         if np.isinf(g_np).any():
                             self.resource_logger.log(f"Batch {batch} 梯度 {i} 包含Inf!")
                 
+                # 计算梯度范数
                 grad_norms = [tf.norm(g).numpy() if g is not None else 0.0 for g in grads]
                 self.resource_logger.log(f"Batch {batch} 梯度范数最大值: {np.max(grad_norms):.4f}")
+                
             except Exception as e:
                 self.resource_logger.log(f"梯度监控出错: {str(e)}")
                 traceback.print_exc()
@@ -394,7 +411,7 @@ class DeepSoundBaseRNN:
 
     def _build_model(self, max_seq_len, output_size=4):
         """构建模型结构"""
-        # 为解决OOM错误，减小模型规模（可选）
+        # 为解决OOM错误，减小模型规模
         layers_config = [
             (16, 18, 3, activations.relu),  # 减少滤波器数量
             (16, 9, 1, activations.relu),
@@ -637,9 +654,13 @@ class DeepSoundBaseRNN:
             self.model.summary(print_fn=self.resource_logger.log)  # 将模型摘要记录到日志
 
             # 3. 训练配置
-            monitor_batch = X[:min(self.batch_size, X.shape[0])]
-            self.resource_logger.log(f"监控批次形状: {monitor_batch.shape}")
-            self.nan_detector.check_nan(monitor_batch, "监控批次数据")
+            monitor_batch_size = min(self.batch_size, X.shape[0])
+            monitor_x = X[:monitor_batch_size]
+            monitor_y = y[:monitor_batch_size]
+            monitor_batch = (monitor_x, monitor_y)  # 构建(x, y)元组用于梯度监控
+            self.resource_logger.log(f"监控批次形状 - X: {monitor_x.shape}, y: {monitor_y.shape}")
+            self.nan_detector.check_nan(monitor_x, "监控批次X数据")
+            self.nan_detector.check_nan(monitor_y, "监控批次y数据")
 
             # 动态验证集
             use_validation = X.shape[0] >= 5
@@ -660,13 +681,17 @@ class DeepSoundBaseRNN:
                 LayerOutputMonitor(
                     model=self.model,
                     layer_names=['time_distributed_cnn', 'bidirectional_gru', 'time_distributed_ffn'],
-                    sample_batch=monitor_batch,
+                    sample_batch=monitor_x,  # 仅需输入数据
                     resource_logger=self.resource_logger
                 ),
                 ReduceLROnPlateau(
                     monitor=monitor_loss, factor=0.5, patience=15, min_lr=1e-8, verbose=1
                 ),
-                GradientMonitor(model=self.model, resource_logger=self.resource_logger),
+                GradientMonitor(
+                    model=self.model,
+                    sample_batch=monitor_batch,  # 传入(x, y)元组
+                    resource_logger=self.resource_logger
+                ),
                 GPUUsageMonitor(interval=10, resource_logger=self.resource_logger)  # 监控所有GPU使用
             ]
 
@@ -950,34 +975,34 @@ class DeepSound(DeepSoundBaseRNN):
         self.output_size = output_size
 
 
-# 测试示例
-if __name__ == "__main__":
-    # 模拟数据训练
-    n_samples = 42
-    input_size = 4000
-    X = []
-    y = []
-    for i in range(n_samples):
-        seq_len = np.random.choice([227, 288, 381, 500, 700, 835])
-        if i % 2 == 0:
-            X.append([[np.random.rand() for _ in range(input_size)] for _ in range(seq_len)])
-        else:
-            X.append(np.random.rand(seq_len, input_size))
-        y.append(np.random.randint(0, 4, seq_len))
+# # 测试示例
+# if __name__ == "__main__":
+#     # 模拟数据训练
+#     n_samples = 42
+#     input_size = 4000
+#     X = []
+#     y = []
+#     for i in range(n_samples):
+#         seq_len = np.random.choice([227, 288, 381, 500, 700, 835])
+#         if i % 2 == 0:
+#             X.append([[np.random.rand() for _ in range(input_size)] for _ in range(seq_len)])
+#         else:
+#             X.append(np.random.rand(seq_len, input_size))
+#         y.append(np.random.randint(0, 4, seq_len))
     
-    model = DeepSound(
-        batch_size=5,  # 可进一步减小批次大小（如2或3）以避免OOM
-        input_size=input_size,
-        output_size=4,
-        n_epochs=10
-    )
-    model.fit(X, y)
+#     model = DeepSound(
+#         batch_size=5,  # 可进一步减小批次大小（如2或3）以避免OOM
+#         input_size=input_size,
+#         output_size=4,
+#         n_epochs=10
+#     )
+#     model.fit(X, y)
     
-    # 预测测试
-    test_samples = X[:5]
-    y_pred = model.predict(test_samples)
-    print(f"预测结果形状: {y_pred.shape}")
+#     # 预测测试
+#     test_samples = X[:5]
+#     y_pred = model.predict(test_samples)
+#     print(f"预测结果形状: {y_pred.shape}")
     
-    # 预测概率测试
-    y_pred_proba = model.predict_proba(test_samples)
-    print(f"预测概率形状: {y_pred_proba.shape}")
+#     # 预测概率测试
+#     y_pred_proba = model.predict_proba(test_samples)
+#     print(f"预测概率形状: {y_pred_proba.shape}")

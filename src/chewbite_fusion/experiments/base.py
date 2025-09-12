@@ -228,7 +228,7 @@ class Experiment:
                             discard_event = False
                         elif not during_event and window_label not in ['no-event',
                                                                        'bite',
-                                                                       'chewbite']:
+                                                                       'chew-bite']:
                             during_event = True
                             # If the windows correspond to a selected event to discard
                             # from a majority class, select it to make zero values and 'no-event'.
@@ -286,7 +286,7 @@ class Experiment:
                 
             # 新增：检查编码后的标签是否超出范围
             all_enc_labels = np.hstack(y_train_enc)
-            max_label = np.max(all_enc_labels)
+            max_label = np.max(all_enc_labels) if len(all_enc_labels) > 0 else -1
             if max_label >= len(self.target_encoder.classes_):
                 logger.error(f"编码后的标签超出范围：最大值{max_label}，有效类别数{len(self.target_encoder.classes_)}")
 
@@ -329,6 +329,34 @@ class Experiment:
                 
 
                 y_signal_pred = funnel.predict(X_test)
+
+                # 新增调试代码：检查预测结果中是否存在类别4
+                if self.manage_sequences:
+                    pred_flat = y_signal_pred[0].flatten()  # 处理序列数据
+                else:
+                    pred_flat = y_signal_pred.flatten()
+                
+                # 打印所有预测类别分布
+                unique_pred, counts_pred = np.unique(pred_flat, return_counts=True)
+                pred_dist = dict(zip(unique_pred, counts_pred))
+                logger.info(f"测试片段 {test_signal_key} 预测类别分布：{pred_dist}")
+                
+                # 重点检查类别4
+                if 4 in unique_pred:
+                    logger.warning(f"测试片段 {test_signal_key} 发现类别4，共出现 {counts_pred[unique_pred == 4][0]} 次")
+                    # 定位类别4的位置
+                    class4_positions = np.where(pred_flat == 4)[0]
+                    logger.info(f"类别4出现的位置索引：{class4_positions[:10]}（仅显示前10个）")
+                    # 查看对应的原始标签（如果有）
+                    if len(self.y[test_signal_key]) >= len(pred_flat):
+                        class4_true_labels = [self.y[test_signal_key][i] for i in class4_positions if i < len(self.y[test_signal_key])]
+                        logger.info(f"类别4位置对应的真实标签：{class4_true_labels[:10]}（仅显示前10个）")
+                    # 查看编码映射是否包含4
+                    if len(self.target_encoder.classes_) <= 4:
+                        logger.error(f"标签编码器仅包含 {len(self.target_encoder.classes_)} 个类别，无法映射类别4")
+                    else:
+                        logger.info(f"类别4对应的原始标签（根据编码器）：{self.target_encoder.classes_[4]}")
+
 
                 if self.manage_sequences:
                     y_signal_pred = y_signal_pred[0]
