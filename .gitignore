@@ -21,5 +21,6 @@ __pycache__/
 .pytest_cache/
 .idea/
 .vscode/
+results/
 data/cache/
 results/
