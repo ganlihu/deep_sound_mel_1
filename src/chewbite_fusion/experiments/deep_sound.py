@@ -16,7 +16,7 @@ def get_model_instance(variable_params):
     return DeepSound(input_size=1800,
                      output_size=4,
                      n_epochs=1500,
-                     batch_size=10,
+                     batch_size=5,
                      training_reshape=True,
                      set_sample_weights=True,
                      feature_scaling=True)
