@@ -400,6 +400,7 @@ class DeepSoundBaseRNN:
         self.padding_class: Optional[int] = None  # 填充类别标记
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
         self.input_size = input_size
+        self.original_lengths: List[int] = []     # 存储训练样本原始长度
 
         self.batch_size = batch_size
         self.n_epochs = n_epochs
@@ -416,11 +417,12 @@ class DeepSoundBaseRNN:
         os.makedirs(self.model_save_path, exist_ok=True)
 
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
-        """构建模型结构，优化维度转换和正则化"""
+        """构建模型结构，优化维度转换和正则化（减少显存占用）"""
+        # 核心修改1：减少CNN卷积核数量，降低特征维度
         layers_config = [
-            (32, 18, 3, activations.relu),
-            (32, 9, 1, activations.relu),
-            (64, 3, 1, activations.relu)
+            (16, 18, 3, activations.relu),  # 原32 -> 16
+            (16, 9, 1, activations.relu),   # 原32 -> 16
+            (32, 3, 1, activations.relu)    # 原64 -> 32
         ]
 
         # CNN子网络 - 用于特征提取
@@ -464,26 +466,26 @@ class DeepSoundBaseRNN:
         cnn.add(layers.Flatten(name='flatten'))
         cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))
 
-        # FFN子网络 - 用于分类
+        # 核心修改2：减少FFN维度，降低参数数量
         ffn = Sequential(name='ffn_subnetwork')
-        ffn.add(layers.Dense(256, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))
+        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))  # 原256 -> 128
         ffn.add(layers.BatchNormalization(name='ffn_bn_1'))
         ffn.add(layers.Activation(activations.relu, name='ffn_act_1'))
         ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_1'))
         
-        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))
+        ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))   # 原128 -> 64
         ffn.add(layers.BatchNormalization(name='ffn_bn_2'))
         ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
         ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
         
         ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
 
-        # 完整模型 - CNN + RNN组合
+        # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
         model = Sequential([
             layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
             layers.TimeDistributed(cnn, name='time_distributed_cnn'),
             layers.Bidirectional(
-                layers.GRU(128,
+                layers.GRU(64,  # 原128 -> 64
                            activation="tanh", 
                            return_sequences=True, 
                            dropout=0.3,
@@ -532,18 +534,21 @@ class DeepSoundBaseRNN:
             # 转换为NumPy数组
             self.resource_logger.log("\n===== 转换样本为NumPy数组 =====")
             X_array: List[np.ndarray] = []
+            self.original_lengths = []  # 重置并记录原始长度
             for i, sample in enumerate(X):
                 if isinstance(sample, list):
                     try:
                         sample_array = np.array(sample, dtype='float32')
                         X_array.append(sample_array)
-                        self.resource_logger.log(f"样本{i}：已从list转换为数组，形状={sample_array.shape}")
+                        self.original_lengths.append(len(sample_array))  # 记录原始长度
+                        self.resource_logger.log(f"样本{i}：已从list转换为数组，形状={sample_array.shape}，原始长度={len(sample_array)}")
                     except ValueError as e:
                         self.resource_logger.log(f"样本{i}：列表转换为数组失败！错误：{e}")
                         raise
                 elif isinstance(sample, np.ndarray):
                     X_array.append(sample)
-                    self.resource_logger.log(f"样本{i}：已是数组，形状={sample.shape}")
+                    self.original_lengths.append(len(sample))  # 记录原始长度
+                    self.resource_logger.log(f"样本{i}：已是数组，形状={sample.shape}，原始长度={len(sample)}")
                 else:
                     raise TypeError(f"样本{i}：既不是list也不是数组，类型={type(sample)}")
             X = X_array
@@ -566,7 +571,7 @@ class DeepSoundBaseRNN:
             else:
                 raise ValueError("X必须是列表或NumPy数组")
 
-            # 同步填充X和y
+            # 同步填充X和y（均在末尾填充）
             target_len = self.max_seq_len
             X_padded: List[np.ndarray] = []
             for sample in X:
@@ -583,7 +588,7 @@ class DeepSoundBaseRNN:
                         pad_width = ((0, 0), (0, self.input_size - feat_dim))
                         sample = np.pad(sample, pad_width, mode='constant', constant_values=0.0)
                 
-                # 填充窗口数维度（右填-1.0）
+                # 填充窗口数维度（右填-1.0，与y填充位置一致）
                 padded = keras.preprocessing.sequence.pad_sequences(
                     sample.T,
                     maxlen=target_len,
@@ -616,7 +621,7 @@ class DeepSoundBaseRNN:
             self.padding_class = max(self.classes_) + 1 if self.classes_ else 0
             self.resource_logger.log(f"检测到的类别: {self.classes_}, 填充类别编号: {self.padding_class}")
             
-            # 填充标签
+            # 填充标签（与X同步在末尾填充）
             y_padded = keras.preprocessing.sequence.pad_sequences(
                 y,
                 maxlen=target_len,
@@ -754,8 +759,12 @@ class DeepSoundBaseRNN:
         finally:
             self.resource_logger.save_log()
 
-    def predict(self, X: Union[List[np.ndarray], np.ndarray]) -> np.ndarray:
-        """模型预测"""
+    def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = True) -> Union[List[np.ndarray], np.ndarray]:
+        """模型预测，返回裁剪填充后的真实音频结果
+        Args:
+            X: 输入数据
+            aggregate: 是否聚合序列结果（每个样本返回一个标签），True时返回一维数组，False时返回原始序列
+        """
         try:
             if self.max_seq_len is None:
                 raise RuntimeError("请先调用fit方法训练模型")
@@ -768,24 +777,28 @@ class DeepSoundBaseRNN:
                 X = X[0]
                 pred_detector.log_process("预测：提取嵌套样本")
             
-            # 转换为数组
+            # 转换为数组并记录原始长度
             X_array: List[np.ndarray] = []
+            pred_original_lengths = []  # 记录预测样本的原始长度
             for i, sample in enumerate(X):
                 if isinstance(sample, list):
                     try:
                         sample_array = np.array(sample, dtype='float32')
                         X_array.append(sample_array)
-                        self.resource_logger.log(f"预测样本{i}：已从list转换为数组，形状={sample_array.shape}")
+                        pred_original_lengths.append(sample_array.shape[0])  # 记录原始长度
+                        self.resource_logger.log(f"预测样本{i}：已从list转换为数组，形状={sample_array.shape}，原始长度={sample_array.shape[0]}")
                     except ValueError as e:
                         self.resource_logger.log(f"预测样本{i}：转换失败！错误：{e}")
                         raise
                 elif isinstance(sample, np.ndarray):
                     X_array.append(sample)
-                    self.resource_logger.log(f"预测样本{i}：已是数组，形状={sample.shape}")
+                    pred_original_lengths.append(sample.shape[0])  # 记录原始长度
+                    self.resource_logger.log(f"预测样本{i}：已是数组，形状={sample.shape}，原始长度={sample.shape[0]}")
                 else:
                     raise TypeError(f"预测样本{i}：类型错误={type(sample)}")
             X = X_array
             pred_detector.check_nan(X, "预测：转换为数组后")
+            self.resource_logger.log(f"预测样本数量: {len(X)}, 原始长度列表: {pred_original_lengths}")
             
             # 统一样本维度
             X = [
@@ -795,6 +808,7 @@ class DeepSoundBaseRNN:
                 for sample in X
             ]
             pred_detector.check_nan(X, "预测：统一维度后")
+            self.resource_logger.log(f"统一维度后样本形状列表: {[s.shape for s in X]}")
             
             # 填充到训练时的最大序列长度
             X_padded: List[np.ndarray] = []
@@ -825,6 +839,7 @@ class DeepSoundBaseRNN:
             if X.ndim == 3:
                 X = np.expand_dims(X, axis=-1)
             pred_detector.check_nan(X, "预测：填充后")
+            self.resource_logger.log(f"填充后X形状: {X.shape}")
             
             # 标准化（与训练时一致）
             non_pad_mask = X != -1.0
@@ -840,24 +855,64 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"预测输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
             y_pred = self.model.predict(X, verbose=0).argmax(axis=-1)
+            self.resource_logger.log(f"模型原始预测输出形状: {y_pred.shape}")
             
-            # 移除填充类别（替换为-1）
-            if self.padding_class is not None:
-                pad_mask = y_pred == self.padding_class
-                if np.any(pad_mask):
-                    pad_count = np.sum(pad_mask)
-                    self.resource_logger.log(f"预测结果中发现 {pad_count} 个填充类别，已替换为无效值(-1)")
-                    y_pred[pad_mask] = -1  # 替换为无效值
+            # 根据原始长度裁剪，去除填充部分
+            trimmed_preds = []
+            for i in range(len(y_pred)):
+                real_len = pred_original_lengths[i]  # 使用预测样本的原始长度
+                trimmed = y_pred[i, :real_len]  # 仅保留真实音频部分
+                trimmed_preds.append(trimmed)
+                self.resource_logger.log(f"样本{i}裁剪后形状: {trimmed.shape}, 原始长度: {real_len}")
             
-            self.resource_logger.log(f"预测完成，结果形状: {y_pred.shape}")
-            return y_pred
+            # 聚合序列结果（每个样本返回一个标签）
+            if aggregate:
+                self.resource_logger.log("开始聚合预测结果...")
+                aggregated = []
+                for i, seq in enumerate(trimmed_preds):
+                    self.resource_logger.log(f"样本{i}聚合前序列形状: {seq.shape}, 序列内容: {seq[:5]}...")  # 只显示前5个元素
+                    
+                    if len(seq) == 0:
+                        # 空序列处理（使用默认类别0）
+                        self.resource_logger.log(f"样本{i}是为空序列，使用默认类别0")
+                        aggregated.append(0)
+                        continue
+                    
+                    # 取众数作为样本标签（处理多时间步预测）
+                    counts = np.bincount(seq)
+                    most_common = np.argmax(counts)
+                    aggregated.append(most_common)
+                    self.resource_logger.log(f"样本{i}聚合结果: {most_common}, 众数统计: {counts}")
+                
+                # 转换为一维数组并确保形状正确
+                result = np.array(aggregated, dtype=int)
+                self.resource_logger.log(f"聚合后结果列表: {aggregated}")
+                self.resource_logger.log(f"聚合后NumPy数组形状: {result.shape}")
+                
+                # 确保结果是一维数组
+                if result.ndim != 1:
+                    self.resource_logger.log(f"警告：聚合结果不是一维数组，尝试重塑，原始形状: {result.shape}")
+                    result = result.flatten()
+                    self.resource_logger.log(f"重塑后形状: {result.shape}")
+                
+                # 最终检查
+                if len(result) == 0:
+                    self.resource_logger.log("警告：聚合结果为空！")
+                elif len(result) != len(trimmed_preds):
+                    self.resource_logger.log(f"警告：聚合结果数量与输入样本数量不匹配！输入: {len(trimmed_preds)}, 输出: {len(result)}")
+                
+                self.resource_logger.log(f"预测完成，聚合后结果形状: {result.shape} (一维数组)")
+                return result
+            else:
+                self.resource_logger.log(f"预测完成，裁剪后结果数量: {len(trimmed_preds)}，均为原始音频长度")
+                return trimmed_preds if len(trimmed_preds) > 1 else trimmed_preds[0]
         except Exception as e:
             self.resource_logger.log(f"预测过程出错: {str(e)}")
             traceback.print_exc()
             raise
 
-    def predict_proba(self, X: Union[List[np.ndarray], np.ndarray]) -> np.ndarray:
-        """预测概率"""
+    def predict_proba(self, X: Union[List[np.ndarray], np.ndarray]) -> Union[List[np.ndarray], np.ndarray]:
+        """预测概率，返回裁剪填充后的真实音频结果"""
         try:
             if self.max_seq_len is None:
                 raise RuntimeError("请先调用fit方法训练模型")
@@ -870,20 +925,23 @@ class DeepSoundBaseRNN:
                 X = X[0]
                 pred_detector.log_process("预测概率：提取嵌套样本")
             
-            # 转换为数组
+            # 转换为数组并记录原始长度
             X_array: List[np.ndarray] = []
+            pred_original_lengths = []  # 记录预测样本的原始长度
             for i, sample in enumerate(X):
                 if isinstance(sample, list):
                     try:
                         sample_array = np.array(sample, dtype='float32')
                         X_array.append(sample_array)
-                        self.resource_logger.log(f"预测概率样本{i}：已从list转换为数组，形状={sample_array.shape}")
+                        pred_original_lengths.append(sample_array.shape[0])
+                        self.resource_logger.log(f"预测概率样本{i}：已转换为数组，形状={sample_array.shape}，原始长度={sample_array.shape[0]}")
                     except ValueError as e:
                         self.resource_logger.log(f"预测概率样本{i}：转换失败！错误：{e}")
                         raise
                 elif isinstance(sample, np.ndarray):
                     X_array.append(sample)
-                    self.resource_logger.log(f"预测概率样本{i}：已是数组，形状={sample.shape}")
+                    pred_original_lengths.append(sample.shape[0])
+                    self.resource_logger.log(f"预测概率样本{i}：已是数组，形状={sample.shape}，原始长度={sample.shape[0]}")
                 else:
                     raise TypeError(f"预测概率样本{i}：类型错误={type(sample)}")
             X = X_array
@@ -940,8 +998,16 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"预测概率输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
             y_pred_proba = self.model.predict(X, verbose=0)
-            self.resource_logger.log(f"预测概率完成，结果形状: {y_pred_proba.shape}")
-            return y_pred_proba
+            
+            # 根据原始长度裁剪，去除填充部分
+            trimmed_probs = []
+            for i in range(len(y_pred_proba)):
+                real_len = pred_original_lengths[i]
+                trimmed = y_pred_proba[i, :real_len, :]  # 仅保留真实音频部分的概率
+                trimmed_probs.append(trimmed)
+            
+            self.resource_logger.log(f"预测概率完成，裁剪后结果数量: {len(trimmed_probs)}，均为原始音频长度")
+            return trimmed_probs if len(trimmed_probs) > 1 else trimmed_probs[0]
         except Exception as e:
             self.resource_logger.log(f"预测概率过程出错: {str(e)}")
             traceback.print_exc()
@@ -955,7 +1021,7 @@ class DeepSoundBaseRNN:
         # 计算类别权重（平衡类别）
         class_weight = np.log((counts.max() / counts) + 1.0)
         
-        # 填充类别权重设为0
+        # 填充类别权重设为0（核心：忽略填充部分的影响）
         if self.padding_class in unique_classes:
             pad_idx = np.where(unique_classes == self.padding_class)[0][0]
             class_weight[pad_idx] = 0.0
@@ -986,7 +1052,7 @@ class DeepSoundBaseRNN:
 class DeepSound(DeepSoundBaseRNN):
     """DeepSound模型，继承自RNN基础类"""
     def __init__(self,
-                 batch_size: int = 5,
+                 batch_size: int = 5,  # 可结合之前修改的experiments/deep_sound.py进一步减小
                  input_size: int = 4000,
                  output_size: int = 3,
                  n_epochs: int = 1400,
