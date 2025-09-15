@@ -1,5 +1,4 @@
 import os
-
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
@@ -7,13 +6,12 @@ from scipy.interpolate import interp1d
 
 def windows2events(y_pred,
                    window_width=0.5,
-                   window_overlap=0.5):
+                   window_overlap=0.5,
+                   no_event_class='no-event'):  # 新增无事件类别参数
     """ Convert predictions from window-level to event-level.
 
     Parameters
     ----------
-    y_true : tensor or numpy.array[str]
-        1D data structure with labels (window-level) for a refence input segment.
     y_pred : tensor or numpy.array[str]
         1D data structure with predictions (window-level) for a refence input segment.
     window_width : float
@@ -28,32 +26,50 @@ def windows2events(y_pred,
     df_pred : pandas DataFrame instance.
         DataFrame with start, end and label columns.
     """
-
-    window_starts = np.array(list(range(len(y_pred)))) *\
-        (window_width - (window_width * window_overlap))
-    window_ends = window_starts + window_width
-
-    df_pred = pd.DataFrame({
-        "start": window_starts,
-        "end": window_ends,
-        "label": y_pred
-    })
-
+    # 计算窗口步长
+    step = window_width * (1 - window_overlap)
+    # 生成窗口时间并过滤无事件窗口
+    valid_windows = []
+    for i, label in enumerate(y_pred):
+        if label == no_event_class:
+            continue  # 跳过无事件窗口
+        start = i * step
+        end = start + window_width
+        valid_windows.append({
+            "start": start,
+            "end": end,
+            "label": label
+        })
+    
+    # 处理无有效事件的情况
+    if not valid_windows:
+        return pd.DataFrame(columns=["start", "end", "label"])
+    
+    df_pred = pd.DataFrame(valid_windows)
     df_pred = merge_contiguous(df_pred)
     return df_pred
 
 
 def merge_contiguous(df):
     """ Given a pandas DataFrame with start, end and label columns it will merge
-        contiguous equally labeled. """
-
-    for i in df.index[:-1]:
-        next_label = df.loc[i + 1].label
-        if next_label == df.loc[i].label:
-            df.loc[i + 1, "start"] = df.loc[i].start
-            df.drop(i, inplace=True)
-
-    return df
+        contiguous equally labeled events. """
+    if df.empty:
+        return df
+    
+    # 按开始时间排序（确保时间序列正确）
+    df = df.sort_values("start").reset_index(drop=True)
+    merged = [df.iloc[0].to_dict()]  # 初始化合并结果
+    
+    for _, row in df.iloc[1:].iterrows():
+        last = merged[-1]
+        # 合并条件：标签相同且时间连续/重叠
+        if row["label"] == last["label"] and row["start"] <= last["end"]:
+            # 取最晚结束时间
+            merged[-1]["end"] = max(last["end"], row["end"])
+        else:
+            merged.append(row.to_dict())
+    
+    return pd.DataFrame(merged)
 
 
 def load_imu_data_from_file(filename):
@@ -135,11 +151,7 @@ def resample_imu_signal(data, signal_duration_sec, frequency, interpolation_kind
     return df
 
 
-
 # 现有代码结束后（如 resample_imu_signal 函数之后）
-
-import numpy as np
-import pandas as pd
 import traceback
 from functools import wraps
 

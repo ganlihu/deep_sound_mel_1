@@ -1,4 +1,3 @@
-from typing import List, Dict
 import os
 import glob
 import random as python_random
@@ -55,7 +54,6 @@ def get_experiment_results(experiment_path, full=False):
             reference_event_list = sed_eval.io.load_event_list(
                 filename=file_pair['reference_file']
             )
-            # 加载预测事件列表（适配新的事件级格式）
             estimated_event_list = sed_eval.io.load_event_list(
                 filename=file_pair['estimated_file']
             )
@@ -67,10 +65,10 @@ def get_experiment_results(experiment_path, full=False):
 
         event_based_metrics = sed_eval.sound_event.EventBasedMetrics(
             event_label_list=unique_labels,
-            t_collar=settings.collar_value  # 使用settings中的容错参数
+            t_collar=settings.collar_value
         )
 
-        # 评估每个文件的事件匹配
+        # Go through files
         for file_pair in data:
             event_based_metrics.evaluate(
                 reference_event_list=file_pair['reference_event_list'],
@@ -83,11 +81,3 @@ def get_experiment_results(experiment_path, full=False):
             fold_metrics.append(event_based_metrics.results_overall_metrics())
 
     return fold_metrics
-
-
-def write_events_to_file(events: List[Dict], file_path: str) -> None:
-    """将事件级结果写入文件（适配sed_eval的格式）"""
-    with open(file_path, 'w', encoding='utf-8') as f:
-        for event in events:
-            # 事件格式：[事件标签] [开始时间] [结束时间]
-            f.write(f"{event['label']}\t{event['start']:.6f}\t{event['end']:.6f}\n")

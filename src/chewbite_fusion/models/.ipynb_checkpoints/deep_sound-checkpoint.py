@@ -415,9 +415,6 @@ class DeepSoundBaseRNN:
         self.strategy: Optional[tf.distribute.Strategy] = None
         self.resource_logger = ResourceLogger()
         os.makedirs(self.model_save_path, exist_ok=True)
-        # 新增：从settings导入窗口宽度参数（用于计算事件时间）
-        from chewbite_fusion.experiments.settings import segment_width_value
-        self.segment_width = segment_width_value  # 窗口宽度（秒）
 
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
         """构建模型结构，优化维度转换和正则化（减少显存占用）"""
@@ -499,12 +496,11 @@ class DeepSoundBaseRNN:
             layers.TimeDistributed(ffn, name='time_distributed_ffn')
         ])
 
-        # 核心修改：优化器添加更强的梯度裁剪，降低NaN风险
         model.compile(
             optimizer=Adam(
-                learning_rate=5e-5,  # 降低学习率，减少梯度爆炸
-                clipnorm=2.0,        # 增强梯度裁剪
-                clipvalue=1.0
+                learning_rate=1e-4,
+                clipnorm=1.0,
+                clipvalue=0.5
             ),
             loss='sparse_categorical_crossentropy',
             weighted_metrics=['accuracy']
@@ -763,44 +759,11 @@ class DeepSoundBaseRNN:
         finally:
             self.resource_logger.save_log()
 
-    def _merge_contiguous_events(self, sequence: np.ndarray) -> List[Dict]:
-        """合并连续相同标签的窗口，生成事件级结果（带时间信息）"""
-        if len(sequence) == 0:
-            return []
-        
-        events = []
-        current_label = sequence[0]
-        start_idx = 0
-        
-        for i in range(1, len(sequence)):
-            if sequence[i] != current_label:
-                # 计算时间（窗口索引*窗口宽度）
-                start_time = start_idx * self.segment_width
-                end_time = i * self.segment_width
-                events.append({
-                    'label': current_label,
-                    'start': start_time,
-                    'end': end_time
-                })
-                current_label = sequence[i]
-                start_idx = i
-        
-        # 添加最后一个事件
-        start_time = start_idx * self.segment_width
-        end_time = len(sequence) * self.segment_width
-        events.append({
-            'label': current_label,
-            'start': start_time,
-            'end': end_time
-        })
-        
-        return events
-
-    def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = True) -> Union[List[np.ndarray], np.ndarray, List[List[Dict]]]:
+    def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = True) -> Union[List[np.ndarray], np.ndarray]:
         """模型预测，返回裁剪填充后的真实音频结果
         Args:
             X: 输入数据
-            aggregate: 是否聚合序列结果（事件级合并），True时返回事件列表，False时返回原始序列
+            aggregate: 是否聚合序列结果（每个样本返回一个标签），True时返回一维数组，False时返回原始序列
         """
         try:
             if self.max_seq_len is None:
@@ -902,23 +865,44 @@ class DeepSoundBaseRNN:
                 trimmed_preds.append(trimmed)
                 self.resource_logger.log(f"样本{i}裁剪后形状: {trimmed.shape}, 原始长度: {real_len}")
             
-            # 聚合序列结果（合并连续事件）
+            # 聚合序列结果（每个样本返回一个标签）
             if aggregate:
-                self.resource_logger.log("开始聚合预测结果（合并连续事件）...")
-                aggregated_events = []
+                self.resource_logger.log("开始聚合预测结果...")
+                aggregated = []
                 for i, seq in enumerate(trimmed_preds):
                     self.resource_logger.log(f"样本{i}聚合前序列形状: {seq.shape}, 序列内容: {seq[:5]}...")  # 只显示前5个元素
                     
-                    # 合并连续相同标签的窗口，生成事件级结果
-                    events = self._merge_contiguous_events(seq)
-                    aggregated_events.append(events)
+                    if len(seq) == 0:
+                        # 空序列处理（使用默认类别0）
+                        self.resource_logger.log(f"样本{i}是为空序列，使用默认类别0")
+                        aggregated.append(0)
+                        continue
                     
-                    # 日志输出事件信息
-                    event_summary = [f"({e['label']}, {e['start']:.2f}-{e['end']:.2f}s)" for e in events]
-                    self.resource_logger.log(f"样本{i}聚合后事件: {', '.join(event_summary)}")
+                    # 取众数作为样本标签（处理多时间步预测）
+                    counts = np.bincount(seq)
+                    most_common = np.argmax(counts)
+                    aggregated.append(most_common)
+                    self.resource_logger.log(f"样本{i}聚合结果: {most_common}, 众数统计: {counts}")
                 
-                self.resource_logger.log(f"预测完成，聚合后事件数量: {len(aggregated_events)}个样本")
-                return aggregated_events
+                # 转换为一维数组并确保形状正确
+                result = np.array(aggregated, dtype=int)
+                self.resource_logger.log(f"聚合后结果列表: {aggregated}")
+                self.resource_logger.log(f"聚合后NumPy数组形状: {result.shape}")
+                
+                # 确保结果是一维数组
+                if result.ndim != 1:
+                    self.resource_logger.log(f"警告：聚合结果不是一维数组，尝试重塑，原始形状: {result.shape}")
+                    result = result.flatten()
+                    self.resource_logger.log(f"重塑后形状: {result.shape}")
+                
+                # 最终检查
+                if len(result) == 0:
+                    self.resource_logger.log("警告：聚合结果为空！")
+                elif len(result) != len(trimmed_preds):
+                    self.resource_logger.log(f"警告：聚合结果数量与输入样本数量不匹配！输入: {len(trimmed_preds)}, 输出: {len(result)}")
+                
+                self.resource_logger.log(f"预测完成，聚合后结果形状: {result.shape} (一维数组)")
+                return result
             else:
                 self.resource_logger.log(f"预测完成，裁剪后结果数量: {len(trimmed_preds)}，均为原始音频长度")
                 return trimmed_preds if len(trimmed_preds) > 1 else trimmed_preds[0]
@@ -1070,7 +1054,7 @@ class DeepSound(DeepSoundBaseRNN):
     def __init__(self,
                  batch_size: int = 5,  # 可结合之前修改的experiments/deep_sound.py进一步减小
                  input_size: int = 4000,
-                 output_size: int = 4,
+                 output_size: int = 3,
                  n_epochs: int = 1400,
                  training_reshape: bool = False,
                  set_sample_weights: bool = True,
