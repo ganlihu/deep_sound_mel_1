@@ -23,3 +23,12 @@ __pycache__/
 .vscode/
 data/cache/
 results/
+
+# 忽略当前文件夹下的results文件夹
+/results/
+
+# 忽略src/chewbite_fusion/results文件夹
+/src/chewbite_fusion/results/
+
+# 忽略src/chewbite_fusion下的所有txt文件
+/src/chewbite_fusion/*.txt
