@@ -395,12 +395,14 @@ class DeepSoundBaseRNN:
                  n_epochs: int = 1400,
                  input_size: int = 1800,
                  set_sample_weights: bool = True,
-                 feature_scaling: bool = True):
+                 feature_scaling: bool = True,
+                 output_size: int = 4):  # 新增output_size参数
         self.classes_: Optional[List[int]] = None
         self.padding_class: Optional[int] = None  # 填充类别标记
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
         self.input_size = input_size
         self.original_lengths: List[int] = []     # 存储训练样本原始长度
+        self.output_size = output_size  # 存储动态输出维度
 
         self.batch_size = batch_size
         self.n_epochs = n_epochs
@@ -418,6 +420,9 @@ class DeepSoundBaseRNN:
 
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
         """构建模型结构，优化维度转换和正则化（减少显存占用）"""
+        # 打印模型输出维度
+        self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={max_seq_len}")
+        
         # 核心修改1：减少CNN卷积核数量，降低特征维度
         layers_config = [
             (16, 18, 3, activations.relu),  # 原32 -> 16
@@ -619,7 +624,10 @@ class DeepSoundBaseRNN:
             # 处理标签和填充类别
             self.classes_ = list(set(np.concatenate(y))) if y and isinstance(y[0], (list, np.ndarray)) else []
             self.padding_class = max(self.classes_) + 1 if self.classes_ else 0
-            self.resource_logger.log(f"检测到的类别: {self.classes_}, 填充类别编号: {self.padding_class}")
+            
+            # 打印填充类别信息
+            self.resource_logger.log(f"训练标签中的类别: {self.classes_}")
+            self.resource_logger.log(f"填充类别编号（padding_class）: {self.padding_class}")
             
             # 填充标签（与X同步在末尾填充）
             y_padded = keras.preprocessing.sequence.pad_sequences(
@@ -652,8 +660,8 @@ class DeepSoundBaseRNN:
                 self.resource_logger.log(f"标准化后X统计: min={np.min(X):.4f}, max={np.max(X):.4f}")
                 self.nan_detector.check_nan(X, "标准化后的X")
 
-            # 确定输出维度
-            output_size = len(self.classes_) + 1 if self.classes_ else 4
+            # 确定输出维度（使用初始化时传入的output_size）
+            output_size = self.output_size
             
             # 分布式训练设置
             self.strategy = tf.distribute.MirroredStrategy()
@@ -759,11 +767,12 @@ class DeepSoundBaseRNN:
         finally:
             self.resource_logger.save_log()
 
-    def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = True) -> Union[List[np.ndarray], np.ndarray]:
+    def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = False) -> Union[List[np.ndarray], np.ndarray]:
         """模型预测，返回裁剪填充后的真实音频结果
         Args:
             X: 输入数据
             aggregate: 是否聚合序列结果（每个样本返回一个标签），True时返回一维数组，False时返回原始序列
+                       默认值改为False，直接返回窗口级预测
         """
         try:
             if self.max_seq_len is None:
@@ -851,10 +860,20 @@ class DeepSoundBaseRNN:
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 pred_detector.check_nan(X, "预测：标准化后")
             
-            # 模型预测
+            # 模型预测（先获取概率再求标签）
             self.resource_logger.log(f"预测输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
-            y_pred = self.model.predict(X, verbose=0).argmax(axis=-1)
+            y_pred_proba = self.model.predict(X, verbose=0)  # 概率形状：(样本数, 窗口数, 类别数)
+            y_pred = y_pred_proba.argmax(axis=-1)  # 取概率最大的标签
+
+            # 打印预测概率与标签（前3个样本的前5个窗口）
+            for i in range(min(3, len(y_pred))):
+                self.resource_logger.log(f"样本{i}预测详情：")
+                for j in range(min(5, y_pred.shape[1])):
+                    probs = y_pred_proba[i, j]  # 该窗口的所有类别概率
+                    pred_label = y_pred[i, j]   # 该窗口的预测标签
+                    self.resource_logger.log(f"  窗口{j} - 概率: {[round(p, 3) for p in probs]} → 预测标签: {pred_label}")
+            
             self.resource_logger.log(f"模型原始预测输出形状: {y_pred.shape}")
             
             # 根据原始长度裁剪，去除填充部分
@@ -862,8 +881,12 @@ class DeepSoundBaseRNN:
             for i in range(len(y_pred)):
                 real_len = pred_original_lengths[i]  # 使用预测样本的原始长度
                 trimmed = y_pred[i, :real_len]  # 仅保留真实音频部分
+                
+                # 打印裁剪前后的标签对比
+                self.resource_logger.log(f"样本{i} - 裁剪前标签（最后5个窗口，可能含填充）: {y_pred[i, -5:]}")
+                self.resource_logger.log(f"样本{i} - 裁剪后标签（实际窗口，长度{real_len}）: {trimmed[-5:] if len(trimmed)>=5 else trimmed}")
+                
                 trimmed_preds.append(trimmed)
-                self.resource_logger.log(f"样本{i}裁剪后形状: {trimmed.shape}, 原始长度: {real_len}")
             
             # 聚合序列结果（每个样本返回一个标签）
             if aggregate:
@@ -904,8 +927,12 @@ class DeepSoundBaseRNN:
                 self.resource_logger.log(f"预测完成，聚合后结果形状: {result.shape} (一维数组)")
                 return result
             else:
-                self.resource_logger.log(f"预测完成，裁剪后结果数量: {len(trimmed_preds)}，均为原始音频长度")
-                return trimmed_preds if len(trimmed_preds) > 1 else trimmed_preds[0]
+                # 直接返回所有窗口的预测结果，展平为一维数组以匹配标签形状
+                flat_predictions = np.concatenate(trimmed_preds) if trimmed_preds else np.array([])
+                self.resource_logger.log(f"预测完成，窗口级结果总长度: {len(flat_predictions)}")
+                self.resource_logger.log(f"窗口级结果形状: {flat_predictions.shape}")
+                return flat_predictions
+
         except Exception as e:
             self.resource_logger.log(f"预测过程出错: {str(e)}")
             traceback.print_exc()
@@ -1052,9 +1079,9 @@ class DeepSoundBaseRNN:
 class DeepSound(DeepSoundBaseRNN):
     """DeepSound模型，继承自RNN基础类"""
     def __init__(self,
-                 batch_size: int = 5,  # 可结合之前修改的experiments/deep_sound.py进一步减小
+                 batch_size: int = 5,
                  input_size: int = 4000,
-                 output_size: int = 3,
+                 output_size: int = 3,  # 接收动态输出维度
                  n_epochs: int = 1400,
                  training_reshape: bool = False,
                  set_sample_weights: bool = True,
@@ -1064,7 +1091,7 @@ class DeepSound(DeepSoundBaseRNN):
             n_epochs=n_epochs,
             input_size=input_size,
             set_sample_weights=set_sample_weights,
-            feature_scaling=feature_scaling
+            feature_scaling=feature_scaling,
+            output_size=output_size  # 传递输出维度到父类
         )
         self.training_reshape = training_reshape
-        self.output_size = output_size

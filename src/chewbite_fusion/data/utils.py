@@ -1,38 +1,23 @@
 import os
 import numpy as np
 import pandas as pd
+import logging
 from scipy.interpolate import interp1d
+
+
+logger = logging.getLogger('yaer')  # 新增日志实例
 
 
 def windows2events(y_pred,
                    window_width=0.5,
                    window_overlap=0.5,
-                   no_event_class='no-event'):  # 新增无事件类别参数
-    """ Convert predictions from window-level to event-level.
-
-    Parameters
-    ----------
-    y_pred : tensor or numpy.array[str]
-        1D data structure with predictions (window-level) for a refence input segment.
-    window_width : float
-        Size of window in seconds used to split signals.
-    window_overlap : float
-        Overlapping proportion between to consecutive windows (0.00 - 1.00).
-    no_event_class : str
-        Identifier used to represent the absence of an event of interest.
-
-    Returns
-    -------
-    df_pred : pandas DataFrame instance.
-        DataFrame with start, end and label columns.
-    """
-    # 计算窗口步长
+                   no_event_class='no-event'):
+    """Convert predictions from window-level to event-level with logging."""
     step = window_width * (1 - window_overlap)
-    # 生成窗口时间并过滤无事件窗口
     valid_windows = []
     for i, label in enumerate(y_pred):
         if label == no_event_class:
-            continue  # 跳过无事件窗口
+            continue
         start = i * step
         end = start + window_width
         valid_windows.append({
@@ -41,56 +26,45 @@ def windows2events(y_pred,
             "label": label
         })
     
-    # 处理无有效事件的情况
+    # 记录窗口过滤情况
+    total_windows = len(y_pred)
+    valid_count = len(valid_windows)
+    logger.debug(f"窗口转事件：总窗口数={total_windows}，有效事件窗口数={valid_count}，无事件窗口数={total_windows - valid_count}")
+    
     if not valid_windows:
         return pd.DataFrame(columns=["start", "end", "label"])
     
     df_pred = pd.DataFrame(valid_windows)
-    df_pred = merge_contiguous(df_pred)
-    return df_pred
+    merged_df = merge_contiguous(df_pred)
+    
+    # 记录合并前后事件数
+    logger.debug(f"事件合并：合并前={len(df_pred)}个窗口事件，合并后={len(merged_df)}个连续事件")
+    return merged_df
 
 
 def merge_contiguous(df):
-    """ Given a pandas DataFrame with start, end and label columns it will merge
-        contiguous equally labeled events. """
+    """Merge contiguous events with same label, add detailed logging."""
     if df.empty:
         return df
     
-    # 按开始时间排序（确保时间序列正确）
     df = df.sort_values("start").reset_index(drop=True)
-    merged = [df.iloc[0].to_dict()]  # 初始化合并结果
+    merged = [df.iloc[0].to_dict()]
+    merge_count = 0  # 记录合并次数
     
     for _, row in df.iloc[1:].iterrows():
         last = merged[-1]
-        # 合并条件：标签相同且时间连续/重叠
         if row["label"] == last["label"] and row["start"] <= last["end"]:
-            # 取最晚结束时间
             merged[-1]["end"] = max(last["end"], row["end"])
+            merge_count += 1
         else:
             merged.append(row.to_dict())
     
+    logger.debug(f"合并完成：共合并{merge_count}次，合并后事件类型分布：{merged_df['label'].value_counts().to_dict()}")
     return pd.DataFrame(merged)
 
 
 def load_imu_data_from_file(filename):
-    ''' Read IMU data stored from Android app and return a Pandas DataFrame instance.
-
-    Params
-    ------
-    filename : str
-        Complete path to the file to be loaded.
-
-    Return
-    ------
-    df : Data-Frame instance.
-        Pandas Data-Frame instance with the following 4 columns:
-        - timestamp_sec: timestamp in seconds.
-        - {a, g, m}x: signal on x axis.
-        - {a, g, m}y: signal on y axis.
-        - {a, g, m}z: signal on z axis.
-    '''
-
-    # Extract first letter from file name.
+    '''Read IMU data stored from Android app and return a Pandas DataFrame instance.'''
     char = os.path.basename(filename)[0]  # a: accelerometer, g: gyroscope, m:magnetometer
 
     dt = np.dtype([('timestamp', '>i8'),
@@ -110,27 +84,7 @@ def load_imu_data_from_file(filename):
 
 
 def resample_imu_signal(data, signal_duration_sec, frequency, interpolation_kind='linear'):
-    ''' Resample a given signal.
-
-    Params
-    ------
-    data : Data-Frame instance.
-        Data loaded using load_data_from_file method.
-
-    signal_duration_sec : float.
-        Total desired duration in seconds (used in order to short resulting signal).
-
-    frequency : int.
-        Target frequency.
-
-    interpolation_kind : str.
-        Interpolation method used.
-
-    Return
-    ------
-    df : Data-Frame instance.
-        Pandas Data-Frame instance with interpolated signals.
-    '''
+    '''Resample a given signal.'''
     axis_cols = [c for c in data.columns if 'timestamp' not in c]
 
     sequence_end = int(data.timestamp_relative.max()) + 1
@@ -151,7 +105,6 @@ def resample_imu_signal(data, signal_duration_sec, frequency, interpolation_kind
     return df
 
 
-# 现有代码结束后（如 resample_imu_signal 函数之后）
 import traceback
 from functools import wraps
 
