@@ -20,7 +20,7 @@ def main(data_source_names=['zavalla2022'],
          movement_sampling_frequency=100,
          window_width=0.5,
          window_overlap=0.5,
-         label_overlapping_threshold=0.5,
+         label_overlapping_threshold=0.3,  # 降低重叠阈值，减少有效标签丢弃
          filter_noises=True,
          include_movement_magnitudes=False,
          no_event_class_name='no-event',
@@ -28,80 +28,6 @@ def main(data_source_names=['zavalla2022'],
          invalidate_cache=True):
     """ Run data processing scripts to turn raw data from (../raw) into
         cleaned data ready to be analyzed (saved in ../processed).
-
-        Parameters
-        ----------
-        data_source_names : list of str
-            List of all data source names to be included in the final dataset.
-            At this moment there is one option valid: 'zavalla2022'.
-        audio_sampling_frequency : int or float
-            Sampling frequency of audio source files.
-        movement_sampling_frequency : int or float
-            Sampling frequency of IMU source files.
-        window_width : float
-            Size of window in seconds used to split signals.
-        window_overlap : float
-            Overlapping proportion between to consecutive windows (0.00 - 1.00).
-        label_overlapping_threshold : float
-            Minimun threshold to assign a label to frame w.r.t. window width (0.00 - 1.00).
-        filter_noises : bool
-            Define if parts of original signals which include noises are included.
-        include_movement_magnitudes : bool
-            Define if magnitudes of IMU data are calculated.
-        no_event_class_name : str
-            Class name to represent the absense of an event of interest.
-        filters : list of tuples.
-            List of filters, channels and a flag to indicate if applied to movement signals.
-            For example, [(signal.butter(10, 15, 'hp'), [0, 1, 2], True)]
-                apply a 15th order high-pass Butterworth filter to acceleromter x, y and z axis.
-        invalidate_cache : bool
-            Force to update cache.
-
-        Returns
-        -------
-        X : Dictionary-like object, with data sources as keys.
-            Each value represent segments of data, and include all extracted windows.
-            Example:
-            X = {
-                'zavalla2022': {
-                    'segment_1_cel_1': [
-                        [
-                                                    # window 1
-                            [0.83, 0.55, 0.21],     # audio mono
-                            [0.0, 0.1, 0.17],       # acc x
-                            [0.0, 0.52, 0.49],      # acc y
-                            [0.0, -0.07, -0.14],    # acc z
-                            [0.0, 0.1, 0.17],       # gyr x
-                            [0.0, 0.52, 0.49],      # gyr y
-                            [0.0, -0.07, -0.14],    # gyr z
-                            [0.0, 0.1, 0.17],       # mag x
-                            [0.0, 0.52, 0.49],      # mag y
-                            [0.0, -0.07, -0.14],    # mag z
-                                                    # OPTIONAL
-                            [0.2, -0.08, 1.15],     # acc magnitude
-                            [0.0, 0.0, 0.1],        # gyr magnitude
-                            [1.0, 0.97, 0.89],      # mag magnitude
-                        ],
-                        [
-                            ...
-                        ]
-                    ]
-                }
-            }
-        y : Dictionary-like object, with data sources as keys.
-            Each value represent segments of data, and include labels for each window.
-            Example:
-            y = {
-                'zavalla2022': {
-                    'segment_1_cel_1': [
-                        'no-event',                 # window 1
-                        'no-event',                 # window 2
-                        'chew',                     # window 3
-                        ...
-                    ],
-                    ...
-                }
-            }
     """
     logger = logging.getLogger(__name__)
 
@@ -123,7 +49,6 @@ def main(data_source_names=['zavalla2022'],
     if cache_item and not invalidate_cache:
         logger.info('*** Retrieving dataset from cache ! ***')
         (X, y) = cache_item
-
         return X, y
 
     logger.info('*** Creating dataset from scratch ! ***')
@@ -162,11 +87,8 @@ def main(data_source_names=['zavalla2022'],
         for segment in segment_files:
             segment_name = os.path.basename(segment[0]).split('.')[0]
             
-            # 新增日志：打印当前片段的长度和包含的文件路径
             logger.info(f"> Segment {segment_name} - 包含文件数量: {len(segment)}")
-            logger.info(f"> 包含的文件路径: {segment}")  # 查看具体是哪些文件（音频、标签、IMU等）
-            
-            
+            logger.info(f"> 包含的文件路径: {segment}")
             logger.info("> Processing segment: %s", segment_name)
 
             # Read audio file.
@@ -187,7 +109,6 @@ def main(data_source_names=['zavalla2022'],
                     data_sampling_frequency = available_datasets[dataset].imu_sampling_frequency
                     if data_sampling_frequency != movement_sampling_frequency:
                         sampling_relation = data_sampling_frequency / movement_sampling_frequency
-
                         signal_decimated = signal.decimate(signal_axis_values,
                                                         int(sampling_relation))
                         imu_data.append(signal_decimated)
@@ -196,13 +117,13 @@ def main(data_source_names=['zavalla2022'],
 
                 if include_movement_magnitudes:
                     accelerometer_magnitude = \
-                        np.sqrt(imu_data[0] ** 2 + imu_data[1] ** 2 + imu_data[2] ** 2)
+                        np.sqrt(imu_data[0] **2 + imu_data[1]** 2 + imu_data[2] **2)
                     imu_data.append(accelerometer_magnitude)
                     gyroscope_magnitude = \
-                        np.sqrt(imu_data[3] ** 2 + imu_data[4] ** 2 + imu_data[5] ** 2)
+                        np.sqrt(imu_data[3]** 2 + imu_data[4] **2 + imu_data[5]** 2)
                     imu_data.append(gyroscope_magnitude)
                     magnetometer_magnitude = \
-                        np.sqrt(imu_data[6] ** 2 + imu_data[7] ** 2 + imu_data[8] ** 2)
+                        np.sqrt(imu_data[6] **2 + imu_data[7]** 2 + imu_data[8] **2)
                     imu_data.append(magnetometer_magnitude)
 
             if filters:
@@ -214,18 +135,26 @@ def main(data_source_names=['zavalla2022'],
                         else:
                             audio_signal = filter_method(audio_signal)
 
-            # Read labels file.
+            # Read labels file + 核心修改1：过滤标签4
             df_segment_labels = pd.read_csv(
                 segment[-1],
                 sep='\t',
                 names=["start", "end", "jm_event"])
+            
+            # 过滤原始标签中的4（根据实际数据格式调整，若为字符串则用'4'）
+            original_label_count = len(df_segment_labels)
+            df_segment_labels = df_segment_labels[df_segment_labels['jm_event'] != 4]
+            filtered_count = original_label_count - len(df_segment_labels)
+            if filtered_count > 0:
+                logger.info(f"Segment {segment_name} 过滤掉 {filtered_count} 个标签4")
 
-            # general_mask = df_segment_labels.jm_event
-            # df_segment_labels.loc[general_mask == 'u', 'jm_event'] = 'unknown'
-            # df_segment_labels.loc[general_mask == 'b', 'jm_event'] = 'bite'
-            # df_segment_labels.loc[general_mask == 'c', 'jm_event'] = 'grazing-chew'
-            # df_segment_labels.loc[general_mask == 'r', 'jm_event'] = 'rumination-chew'
-            # df_segment_labels.loc[general_mask == 'x', 'jm_event'] = 'chewbite'
+            # 标签映射（启用注释的映射逻辑，确保标签标准化）
+            general_mask = df_segment_labels.jm_event
+            df_segment_labels.loc[general_mask == 'u', 'jm_event'] = 'unknown'
+            df_segment_labels.loc[general_mask == 'b', 'jm_event'] = 'bite'
+            df_segment_labels.loc[general_mask == 'c', 'jm_event'] = 'grazing-chew'
+            df_segment_labels.loc[general_mask == 'r', 'jm_event'] = 'rumination-chew'
+            df_segment_labels.loc[general_mask == 'x', 'jm_event'] = 'chewbite'
 
             # Get windows from signals.
             audio_windows = get_windows_from_audio_signal(
@@ -234,17 +163,11 @@ def main(data_source_names=['zavalla2022'],
                 window_width=window_width,
                 window_overlap=window_overlap)
 
-            
-            # 添加日志：打印音频长度和窗口数量
             logger.info(f"Segment {segment_name} audio length: {len(audio_signal)/audio_sampling_frequency:.2f}s")
             logger.info(f"Generated {len(audio_windows)} windows for {segment_name}")
-            
-            
-            # 检查音频窗口
             audio_has_nan = any(np.isnan(window).any() for window in audio_windows)
             logger.info(f"Segment {segment_name} audio windows have NaN: {audio_has_nan}")
-            
-            
+
             imu_windows = []
             if dataset_has_movement_data:
                 imu_windows = get_windows_from_imu_signals(
@@ -262,7 +185,7 @@ def main(data_source_names=['zavalla2022'],
                         ({len(audio_windows)}) and IMU data ({len(imu_windows)}).'''
 
             # Get window labels.
-            window_labes = get_windows_labels(
+            window_labels = get_windows_labels(
                 df_segment_labels,
                 len(audio_windows),
                 window_width=window_width,
@@ -285,9 +208,12 @@ def main(data_source_names=['zavalla2022'],
                         window_channels.append(imu_windows[i][c_i])
                 segment_windows.append(window_channels)
 
-            # Construct final results.
+            # 记录标签分布，检查有效标签是否被保留
+            label_counts = pd.Series(window_labels).value_counts()
+            logger.info(f"Segment {segment_name} 窗口标签分布: {dict(label_counts)}")
+
             X_dataset_segments[segment_name] = segment_windows
-            y_dataset_segments[segment_name] = window_labes
+            y_dataset_segments[segment_name] = window_labels
 
         X[dataset] = X_dataset_segments
         y[dataset] = y_dataset_segments
@@ -315,30 +241,12 @@ def get_windows_from_audio_signal(
         sampling_frequency,
         window_width,
         window_overlap):
-    ''' Generate signal chunks using a fixed time window.
-
-    Parameters
-    ----------
-    signal : NumPy array
-        Signal values.
-    sampling_frequency : int
-        Number of samples per second.
-    window_width : float
-        Size of window in seconds used to split signals.
-    window_overlap : float
-        Overlapping proportion between to consecutive windows (0.00 - 1.00).
-
-    Returns
-    -------
-    windows : list of lists.
-        Extracted windows.
-    '''
+    ''' Generate signal chunks using a fixed time window. '''
     windows = librosa.util.frame(signal,
                                  frame_length=int(sampling_frequency * window_width),
                                  hop_length=int((1 - window_overlap) * int(sampling_frequency *
                                                                            window_width)),
                                  axis=0)
-
     return windows
 
 
@@ -347,25 +255,7 @@ def get_windows_from_imu_signals(
         sampling_frequency,
         window_width,
         window_overlap):
-    ''' Generate signal chunks using a fixed time window.
-
-    Parameters
-    ----------
-    signal : NumPy array
-        Signal values.
-    sampling_frequency : int
-        Number of samples per second.
-    window_width : float
-        Size of window in seconds used to split signals.
-    window_overlap : float
-        Overlapping proportion between to consecutive windows (0.00 - 1.00).
-
-    Returns
-    -------
-    windows : list of lists.
-        Extracted windows.
-    '''
-
+    ''' Generate signal chunks using a fixed time window. '''
     hop_length = int((1 - window_overlap) * int(sampling_frequency * window_width))
     frame_length = int(sampling_frequency * window_width)
 
@@ -376,7 +266,6 @@ def get_windows_from_imu_signals(
                                frame_length=frame_length,
                                hop_length=hop_length,
                                axis=0))
-
     return list(map(list, zip(*signals)))
 
 
@@ -387,36 +276,14 @@ def get_windows_labels(
         window_overlap,
         label_overlapping_threshold,
         no_event_class_name):
-    ''' Extract labels for each window.
-
-    Parameters
-    ----------
-    labels : pandas DataFrame instance.
-        Labels information including start, end and event.
-    n_windows : int
-        Number of windows.
-    window_width : float
-        Size of window in seconds used to split signals.
-    window_overlap : float
-        Percentage of overlapping between to consecutive windows (0-100%).
-    label_overlapping_threshold : float
-        Minimun threshold to assign a label to frame w.r.t. window width (0-100%).
-    no_event_class_name : str
-        Class name to represent the absense of an event of interest.
-
-    Returns
-    -------
-    window_labels : list
-        Corresponding label for each window.
-    '''
+    ''' Extract labels for each window. '''
     window_start = 0
     window_end = window_width
-
     window_labels = []
-
-    labels['not_used'] = True
+    labels['not_used'] = True  # 标记未被使用的标签
 
     for i in range(n_windows):
+        # 查找与当前窗口有交集的标签
         labels_matched = labels[(labels.start <= window_end) & (labels.end >= window_start)]
 
         if len(labels_matched) > 0:
@@ -429,47 +296,38 @@ def get_windows_labels(
                                      index,
                                      event_duration))
 
-            # Sort all labels with overlap.
+            # 按重叠时间排序
             overlappings.sort(key=lambda tup: tup[0], reverse=True)
-
             exist_overlap_for_window = False
-            for ix_o, overlap in enumerate(overlappings):
-                # If the window contains the entire event, asign the label.
-                # event:            |     |
-                # window:        |            |
-                window_contains_the_event = (overlap[0] / overlap[3]) == 1
 
-                # If overlap % compared to window width reachs the threshold, asign the label.
-                # event:        | ------|       - (overlap)
-                # window:        |------   |
+            for ix_o, overlap in enumerate(overlappings):
+                # 窗口完全包含事件 或 重叠比例超过阈值
+                window_contains_the_event = (overlap[0] / overlap[3]) == 1
                 relative_overlap = (overlap[0] / window_width)
                 overlap_reachs_threshold = relative_overlap >= label_overlapping_threshold
 
-                # If any of created conditions is True, then asign the label to the window.
-                if (window_contains_the_event or overlap_reachs_threshold):
+                if window_contains_the_event or overlap_reachs_threshold:
                     exist_overlap_for_window = True
-
-                    # If overlap is enough, the label of event with more overlap will be used.
                     window_labels.append(overlap[1])
-
-                    # All events with enough overlap are used.
-                    labels.loc[overlap[2], 'not_used'] = False
-
+                    labels.loc[overlap[2], 'not_used'] = False  # 标记为已使用
                     break
 
             if not exist_overlap_for_window:
+                # 核心修改2：记录未达阈值的有效标签，便于排查
+                logger.debug(f"窗口{i}未分配标签（重叠不足），候选标签: {[o[1] for o in overlappings]}")
                 window_labels.append(no_event_class_name)
         else:
             window_labels.append(no_event_class_name)
 
-        window_start = window_start + window_width * (1 - window_overlap)
+        # 滑动窗口
+        window_start += window_width * (1 - window_overlap)
         window_end = window_start + window_width
 
-    # not_used_labels = labels[(labels.jm_event != 'u') & (labels.not_used)]
+    # 记录未使用的有效标签（用于排查有效标签丢弃问题）
     not_used_labels = labels[labels.not_used]
     if len(not_used_labels) > 0:
-        logger.info('Some labels have not been used: %s', str(len(not_used_labels)))
+        logger.warning(f"存在未使用的有效标签（可能被丢弃）: {len(not_used_labels)}个，详情: {not_used_labels['jm_event'].tolist()}")
     else:
-        logger.info('All labels have been used.')
+        logger.info('所有标签均已被使用')
 
     return window_labels

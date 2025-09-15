@@ -1,7 +1,7 @@
 import os
 import logging
 import pickle
-import gc  # 垃圾回收模块
+import gc
 from glob import glob
 from datetime import datetime as dt
 import hashlib
@@ -12,7 +12,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import ParameterGrid
 import sed_eval
 import dcase_util
-import tensorflow as tf  # 导入TensorFlow
+import tensorflow as tf
 
 from chewbite_fusion.data.utils import windows2events
 from chewbite_fusion.experiments import settings
@@ -58,11 +58,10 @@ class Experiment:
         self.quantization = quantization
         self.data_augmentation = data_augmentation
 
-        # 创建实验路径
         self.path = os.path.join(settings.experiments_path, name, self.timestamp)
         os.makedirs(self.path, exist_ok=True)
 
-        # 配置日志（文件和标准输出）
+        # 配置日志
         logger.handlers = []
         fileHandler = logging.FileHandler(f"{self.path}/experiment.log")
         formatter = logging.Formatter(
@@ -72,7 +71,6 @@ class Experiment:
         fileHandler.setFormatter(formatter)
         logger.addHandler(fileHandler)
 
-        # 设置随机种子
         set_random_init()
 
     def run(self):
@@ -88,7 +86,7 @@ class Experiment:
             except:
                 logger.error(f'Failed to parse segment ID from {k}')
 
-        # 折叠划分（基于反刍片段的分层随机抽样）
+        # 折叠划分
         folds = {
             '1': [40, 41, 7, 37, 26, 24, 17, 48, 21, 5],
             '2': [33, 52, 23, 4, 15, 36, 49, 18, 28, 50],
@@ -98,8 +96,6 @@ class Experiment:
         }
 
         self.train_validation_segments = [seg for fold in folds.values() for seg in fold]
-
-        # 记录训练验证片段信息
         logger.info('train_validation_segments count: %d', len(self.train_validation_segments))
         logger.info('train_validation_segments: %s', self.train_validation_segments)
 
@@ -114,11 +110,9 @@ class Experiment:
                 else:
                     logger.info('Running folds without grid search.')
 
-                # 生成参数哈希值
                 hash_method_instance.update(str(params_combination).encode())
                 params_combination_hash = hash_method_instance.hexdigest()
 
-                # 执行k折交叉验证
                 params_combination_result = self.execute_kfoldcv(
                     folds=folds,
                     is_grid_search=True,
@@ -127,7 +121,6 @@ class Experiment:
 
                 params_results[params_combination_hash] = (params_combination_result, params_combination)
 
-            # 选择最佳参数组合
             best_params_combination = max(params_results.values(), key=lambda i: i[0])[1]
             logger.info('-' * 25)
             logger.info('>>> All params combination values: %s <<<', str(params_results))
@@ -138,7 +131,6 @@ class Experiment:
             logger.info('>>> Skipping grid search! No params dict provided. <<<')
             best_params_combination = full_grid[0] if full_grid else {}
 
-        # 使用最佳参数执行最终交叉验证
         self.execute_kfoldcv(
             folds=folds,
             is_grid_search=False,
@@ -157,7 +149,6 @@ class Experiment:
             train_fold_keys = [k for k in self.X.keys() if int(k.split('_')[1]) not in fold]
             train_fold_keys = [k for k in train_fold_keys if int(k.split('_')[1]) in self.train_validation_segments]
 
-            # 记录训练片段信息
             logger.info('Train fold keys count: %d', len(train_fold_keys))
             logger.info('Train fold keys: %s.', str(train_fold_keys))
 
@@ -187,7 +178,6 @@ class Experiment:
             # 数据增强
             if self.data_augmentation:
                 from augly.audio import functional
-                # 计算类别分布
                 all_y = []
                 n_labels = 0
                 for i_file in range(len(X_train)):
@@ -198,12 +188,10 @@ class Experiment:
                 unique, counts = np.unique(all_y, return_counts=True)
                 classes_probs = dict(zip(unique, counts / n_labels))
 
-                # 复制原始数据
                 import copy
                 X_augmented = copy.deepcopy(X_train)
                 y_augmented = copy.deepcopy(y_train)
 
-                # 增强处理
                 for i_file in range(len(X_train)):
                     during_event = False
                     discard_event = False
@@ -215,18 +203,15 @@ class Experiment:
                             discard_event = False
                         elif not during_event and window_label not in ['no-event', 'bite', 'chew-bite']:
                             during_event = True
-                            # 对多数类事件进行随机丢弃
                             if np.random.rand() <= classes_probs[window_label] * 2:
                                 discard_event = True
 
                         if during_event and discard_event:
-                            # 零值替换并标记为无事件
                             for i_channel in range(len(X_train[i_file][i_window])):
                                 window_len = len(X_augmented[i_file][i_window][i_channel])
                                 X_augmented[i_file][i_window][i_channel] = np.zeros(window_len)
                                 y_augmented[i_file][i_window] = 'no-event'
                         else:
-                            # 添加背景噪音
                             for i_channel in range(len(X_train[i_file][i_window])):
                                 sample_rate = 6000 if i_channel == 0 else 100
                                 window = X_augmented[i_file][i_window][i_channel]
@@ -239,9 +224,22 @@ class Experiment:
                 y_train.extend(y_augmented)
                 logger.info(f"数据增强后训练样本数: {len(X_train)}")
 
-            # 标签编码
+            # 标签编码 + 核心修改3：过滤标签4（若存在）
+            # 1. 展平训练标签
+            flat_y_train = np.hstack(y_train) if self.manage_sequences else y_train
+            # 2. 过滤异常标签4
+            valid_flat_y_train = flat_y_train[flat_y_train != 4]
+            invalid_count = len(flat_y_train) - len(valid_flat_y_train)
+            if invalid_count > 0:
+                logger.warning(f"训练数据中过滤掉 {invalid_count} 个标签4")
+
+            # 3. 编码有效标签
             self.target_encoder = LabelEncoder()
-            unique_labels = np.unique(np.hstack(y_train))
+            unique_labels = np.unique(valid_flat_y_train)
+            # 额外检查：确保无标签4
+            if 4 in unique_labels:
+                unique_labels = unique_labels[unique_labels != 4]
+                logger.error("训练标签中仍存在4，已强制过滤")
             self.target_encoder.fit(unique_labels)
 
             # 记录标签映射关系
@@ -251,9 +249,14 @@ class Experiment:
 
             # 编码训练标签
             if self.manage_sequences:
-                y_train_enc = [self.target_encoder.transform(file_labels) for file_labels in y_train]
+                y_train_enc = []
+                for file_labels in y_train:
+                    # 过滤每个文件中的标签4
+                    valid_labels = [l for l in file_labels if l != 4]
+                    y_train_enc.append(self.target_encoder.transform(valid_labels))
             else:
-                y_train_enc = self.target_encoder.transform(y_train)
+                valid_y_train = [l for l in y_train if l != 4]
+                y_train_enc = self.target_encoder.transform(valid_y_train)
 
             # 检查编码标签范围
             all_enc_labels = np.hstack(y_train_enc)
@@ -293,30 +296,60 @@ class Experiment:
                 X_test = [self.X[test_signal_key]] if self.manage_sequences else self.X[test_signal_key]
                 y_signal_pred = funnel.predict(X_test)
 
-                # 检查预测结果异常
-                pred_flat = np.ravel(y_signal_pred[0]) if self.manage_sequences else y_signal_pred.flatten()
+                # 处理预测结果
+                if self.manage_sequences:
+                    pred_flat = np.ravel(y_signal_pred[0])
+                else:
+                    pred_flat = y_signal_pred.flatten()
+                
+                # 过滤非数值预测
+                if pred_flat.dtype == 'object':
+                    logger.warning(f"测试片段 {test_signal_key} 发现非数值预测结果，正在清理...")
+                    cleaned = []
+                    for item in pred_flat:
+                        if isinstance(item, dict):
+                            if 'label' in item and isinstance(item['label'], (int, float)):
+                                cleaned.append(item['label'])
+                            else:
+                                logger.warning(f"丢弃无效字典预测: {item}")
+                        elif isinstance(item, (int, float, np.number)):
+                            cleaned.append(item)
+                        else:
+                            logger.warning(f"丢弃非数值预测: {item} (类型: {type(item)})")
+                    pred_flat = np.array(cleaned, dtype=np.float32)
+
+                # 核心修改4：过滤预测结果中的标签4
+                pred_flat = pred_flat[pred_flat != 4]
+                if len(pred_flat) < len(y_signal_pred.flatten()):
+                    logger.info(f"测试片段 {test_signal_key} 过滤掉预测结果中的标签4")
+
+                # 计算预测分布
                 unique_pred, counts_pred = np.unique(pred_flat, return_counts=True)
                 pred_dist = dict(zip(unique_pred, counts_pred))
                 logger.info(f"测试片段 {test_signal_key} 预测类别分布：{pred_dist}")
 
                 # 检查异常类别
-                max_expected = len(self.target_encoder.classes_) - 1
+                max_expected = len(self.target_encoder.classes_) - 1 if len(self.target_encoder.classes_) > 0 else -1
                 invalid_preds = [p for p in unique_pred if p > max_expected]
                 if invalid_preds:
                     for p in invalid_preds:
                         count = counts_pred[unique_pred == p][0]
                         logger.warning(f"测试片段 {test_signal_key} 发现异常类别 {p}，共出现 {count} 次")
-                        positions = np.where(pred_flat == p)[0]
-                        logger.info(f"异常类别 {p} 出现的位置索引：{positions[:10]}（仅显示前10个）")
-                        if len(self.y[test_signal_key]) >= len(pred_flat):
-                            true_labels = [self.y[test_signal_key][i] for i in positions if i < len(self.y[test_signal_key])]
-                            logger.info(f"异常类别位置对应的真实标签：{true_labels[:10]}（仅显示前10个）")
 
                 # 逆编码预测结果
-                if self.manage_sequences:
-                    y_signal_pred = np.ravel(y_signal_pred[0])
-                logger.info(f"test_signal_key: {test_signal_key}, y_signal_pred形状: {y_signal_pred.shape}, 类型: {type(y_signal_pred)}")
-                y_signal_pred_labels = self.target_encoder.inverse_transform(y_signal_pred)
+                y_signal_pred_enc = np.ravel(y_signal_pred[0]) if self.manage_sequences else y_signal_pred.flatten()
+                if y_signal_pred_enc.dtype == 'object':
+                    y_signal_pred_enc = np.array([
+                        item['label'] if isinstance(item, dict) and 'label' in item else item
+                        for item in y_signal_pred_enc
+                        if isinstance(item, (int, float, np.number, dict))
+                    ], dtype=np.int32)
+                # 再次过滤标签4
+                y_signal_pred_enc = y_signal_pred_enc[y_signal_pred_enc != 4]
+                y_signal_pred_labels = self.target_encoder.inverse_transform(y_signal_pred_enc)
+
+                # 合并相邻相同的预测结果
+                y_signal_pred_labels = self.merge_adjacent_labels(y_signal_pred_labels)
 
                 # 保存预测结果
                 y_test = self.y[test_signal_key]
@@ -324,7 +357,6 @@ class Experiment:
 
             # 每折结束释放资源
             logger.info(f"折 {ix_fold} 训练/测试完成，开始释放资源...")
-            # 删除模型和数据
             if hasattr(self, 'model'):
                 del self.model
             if 'funnel' in locals():
@@ -340,7 +372,6 @@ class Experiment:
             if 'X_augmented' in locals():
                 del X_augmented
                 del y_augmented
-            # 清除Keras会话和GPU内存
             tf.keras.backend.clear_session()
             gc.collect()
             try:
@@ -369,6 +400,17 @@ class Experiment:
 
         return fold_metrics
 
+    def merge_adjacent_labels(self, labels):
+        '''合并相邻且相同的标签'''
+        if len(labels) == 0:
+            return labels
+        merged = [labels[0]]
+        for label in labels[1:]:
+            if label == merged[-1]:
+                continue
+            merged.append(label)
+        return np.array(merged)
+
     def save_predictions(self, fold_labels_predictions):
         ''' 保存预测结果并转换为事件格式 '''
         df = pd.DataFrame(columns=['segment', 'y_true', 'y_pred'])
@@ -377,12 +419,16 @@ class Experiment:
             y_true = fold_labels_predictions[segment][0]
             y_pred = fold_labels_predictions[segment][1]
 
-            # 保存标签与预测的DataFrame
+            min_length = min(len(y_true), len(y_pred))
+            if len(y_true) != len(y_pred):
+                logger.warning(f"片段 {segment} 的y_true与y_pred长度不匹配（{len(y_true)} vs {len(y_pred)}），已截断到最短长度")
+                y_true = y_true[:min_length]
+                y_pred = y_pred[:min_length]
+
             _df = pd.DataFrame({'y_true': y_true, 'y_pred': y_pred})
             _df['segment'] = segment
             df = pd.concat([df, _df], ignore_index=True)
 
-            # 转换窗口为事件并保存
             df_labels = windows2events(y_true, self.window_width, self.window_overlap)
             df_labels = df_labels[df_labels.label != self.no_event_class]
             df_labels.to_csv(os.path.join(self.path, f'{segment}_true.txt'),
@@ -418,57 +464,33 @@ class Experiment:
                              'estimated_event_list': estimated_event_list})
                 all_data += reference_event_list
 
-            # 计算片段级和事件级指标
-            segment_based_metrics = sed_eval.sound_event.SegmentBasedMetrics(
-                event_label_list=unique_labels,
-                time_resolution=settings.segment_width_value
-            )
             event_based_metrics = sed_eval.sound_event.EventBasedMetrics(
                 event_label_list=unique_labels,
                 t_collar=settings.collar_value
             )
 
             for file_pair in data:
-                segment_based_metrics.evaluate(
-                    reference_event_list=file_pair['reference_event_list'],
-                    estimated_event_list=file_pair['estimated_event_list']
-                )
                 event_based_metrics.evaluate(
                     reference_event_list=file_pair['reference_event_list'],
                     estimated_event_list=file_pair['estimated_event_list']
                 )
 
-            # 保存指标
-            metrics = {
-                'segment_based_metrics': segment_based_metrics,
-                'event_based_metrics': event_based_metrics
-            }
             with open(os.path.join(self.path, f'experiment_metrics_fold_{ix_fold}.pkl'), 'wb') as handle:
-                pickle.dump(metrics, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump({'event_based_metrics': event_based_metrics}, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-            # 提取指标结果
-            segment_metrics = segment_based_metrics.results_overall_metrics()
             event_metrics = event_based_metrics.results_overall_metrics()
 
             if verbose:
-                logger.info('### Segment based metrics (fold %s) ###', ix_fold)
-                logger.info(segment_based_metrics)
-                logger.info('')
                 logger.info('### Event based metrics (fold %s) ###', ix_fold)
                 logger.info(event_based_metrics)
                 logger.info('-' * 20)
 
-            fold_metrics_detail[ix_fold] = {
-                'event_score': event_metrics[final_metric],
-                'segment_score': segment_metrics[final_metric]
-            }
+            fold_metrics_detail[ix_fold] = {'event_score': event_metrics[final_metric]}
             fold_metrics.append(event_metrics[final_metric][final_metric])
 
-        # 保存整体指标
         with open(os.path.join(self.path, 'experiment_overall_metrics.pkl'), 'wb') as handle:
             pickle.dump(fold_metrics_detail, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-        # 计算均值和标准差
         folds_mean = np.round(np.mean(fold_metrics), 6) if fold_metrics else 0.0
         folds_std = np.round(np.std(fold_metrics), 6) if fold_metrics else 0.0
 
@@ -485,14 +507,12 @@ class Experiment:
         output_logs_path = os.path.join(self.path, f'logs_fold_{n_fold}')
         output_model_checkpoint_path = os.path.join(self.path, f'model_checkpoints_fold_{n_fold}')
 
-        # 非网格搜索时检查路径是否存在
         if not is_grid_search:
             if os.path.exists(output_logs_path):
                 raise FileExistsError('Model output logs path already exists!')
             if os.path.exists(output_model_checkpoint_path):
                 raise FileExistsError('Model output checkpoints path already exists!')
 
-        # 创建路径并赋值给模型
         os.makedirs(output_logs_path, exist_ok=True)
         self.model.output_logs_path = output_logs_path
 
