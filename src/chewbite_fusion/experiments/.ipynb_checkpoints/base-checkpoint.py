@@ -228,11 +228,27 @@ class Experiment:
                 y_train.extend(y_augmented)
                 logger.info(f"数据增强后训练样本数: {len(X_train)}")
 
+                # 数据增强后标签检查
+                all_augmented_labels = np.hstack(y_train) if isinstance(y_train[0], (list, np.ndarray)) else y_train
+                unique_augmented = np.unique(all_augmented_labels)
+                logger.info(f"===== 数据增强后标签检查 =====")
+                logger.info(f"增强后去重标签: {unique_augmented}")
+                logger.info(f"增强后标签数量: {len(unique_augmented)}")
+                logger.info(f"=========================")
+
             # 标签编码
             self.target_encoder = LabelEncoder()
             # 展平y_train获取所有原始标签（处理序列数据）
             all_raw_labels = np.hstack(y_train) if isinstance(y_train[0], (list, np.ndarray)) else y_train
             unique_labels = np.unique(all_raw_labels)
+
+            # 新增：训练数据标签数量检查
+            logger.info(f"===== 标签数量核心检查 =====")
+            logger.info(f"训练数据中所有原始标签（前100个）: {all_raw_labels[:100]}")  # 打印部分标签
+            logger.info(f"去重后的标签列表: {unique_labels}")
+            logger.info(f"去重后的标签数量: {len(unique_labels)}")  # 关键：检查是否为5
+            logger.info(f"=========================")
+
             self.target_encoder.fit(unique_labels)
 
             # 打印原始标签与编码映射
@@ -248,10 +264,28 @@ class Experiment:
             else:
                 y_train_enc = self.target_encoder.transform(y_train)
 
-            # 创建模型实例（移除output_size参数，使用固定输出维度）
+            # 创建模型实例（检查输出维度）
             num_classes = len(unique_labels)
-            model_instance = self.model_factory(parameters_combination)  # 核心修改：移除output_size参数
-            logger.info(f"折 {ix_fold} - 模型实例化：使用固定输出维度（已在模型定义中设置）")
+            logger.info(f"===== 模型输出维度核心检查 =====")
+            logger.info(f"根据标签计算的num_classes: {num_classes}")  # 关键：检查是否为5
+
+            model_instance = self.model_factory(parameters_combination)
+            
+            # 检查模型实际输出维度
+            if hasattr(model_instance, 'output_shape'):
+                # 对于Keras模型，输出形状通常是 (None, ..., num_classes)
+                model_output_dim = model_instance.output_shape[-1]
+                logger.info(f"模型实际输出维度: {model_output_dim}")
+            elif hasattr(model_instance, 'n_classes'):
+                # 对于自定义模型，检查n_classes属性
+                logger.info(f"模型定义的类别数: {model_instance.n_classes}")
+            elif hasattr(model_instance, 'output_size'):
+                # 适配DeepSoundBaseRNN的output_size属性
+                logger.info(f"模型定义的输出尺寸: {model_instance.output_size}")
+            else:
+                logger.warning("无法检测模型输出维度，请检查模型定义")
+            logger.info(f"=========================")
+
             self.model = model_instance
             self.set_model_output_path(ix_fold, is_grid_search)
 
@@ -280,27 +314,93 @@ class Experiment:
             # 模型预测与评估
             fold_window_acc = []  # 当前折的窗口级准确率
             for test_signal_key in test_fold_keys:
+                # 所有片段都输出详细标签
+                logger.info("="*50)
+                logger.info(f"===== 开始处理片段 {test_signal_key} =====")
+                logger.info("="*50)
+
                 X_test = [self.X[test_signal_key]] if self.manage_sequences else self.X[test_signal_key]
-                # 明确指定不聚合，获取窗口级预测
+                # 获取原始标签（填充前）
+                y_test_raw = self.y[test_signal_key]
+                y_test_flat = np.ravel(y_test_raw)
+                original_length = len(y_test_flat)
+                
+                # 打印填充前的原始标签
+                logger.info(f"测试片段 {test_signal_key} - 填充前原始标签（编码前）:")
+                self._print_labels_in_chunks(y_test_raw, chunk_size=20)
+                
+                # 编码原始标签用于对比
+                y_test_enc = self.target_encoder.transform(y_test_flat)
+                logger.info(f"测试片段 {test_signal_key} - 填充前编码标签:")
+                self._print_labels_in_chunks(y_test_enc, chunk_size=20)
+
+                # 明确指定不聚合，获取窗口级预测（可能经过填充）
                 y_signal_pred = funnel.predict(X_test)
+                processed_length = len(y_signal_pred)
+                
+                # 打印填充后的预测标签
+                logger.info(f"测试片段 {test_signal_key} - 填充后预测标签:")
+                self._print_labels_in_chunks(y_signal_pred, chunk_size=20)
 
-                # 打印解码前的编码标签（检查是否有4）
-                logger.info(f"测试片段 {test_signal_key} - 预测编码标签（前10个窗口）: {y_signal_pred[:10]}")
+                # 截断到原始长度
+                truncated_length = min(processed_length, original_length)
+                y_signal_pred_truncated = y_signal_pred[:truncated_length]
+                
+                # 打印截断后的预测标签
+                logger.info(f"测试片段 {test_signal_key} - 截断后预测标签:")
+                self._print_labels_in_chunks(y_signal_pred_truncated, chunk_size=20)
+
+                # 输出标签处理信息
+                logger.info(f"测试片段 {test_signal_key} - 标签长度信息：")
+                logger.info(f"  原始长度（填充前）: {original_length}")
+                logger.info(f"  填充后长度: {processed_length}")
+                logger.info(f"  截断后长度: {truncated_length}")
+
+                # 打印标签数量与分布
+                logger.info(f"测试片段 {test_signal_key} - 预测编码标签数量: {len(y_signal_pred)}")
+                logger.info(f"测试片段 {test_signal_key} - 真实编码标签数量: {len(y_test_enc)}")
                 logger.info(f"测试片段 {test_signal_key} - 预测编码标签中的唯一值: {np.unique(y_signal_pred)}")
-
-                # 检查预测结果异常
+                
+                # 计算分布
                 pred_flat = y_signal_pred.flatten()
                 unique_pred, counts_pred = np.unique(pred_flat, return_counts=True)
                 pred_dist = dict(zip(unique_pred, counts_pred))
                 logger.info(f"测试片段 {test_signal_key} 预测类别分布：{pred_dist}")
 
-                # 逆编码预测结果（已为窗口级）
-                y_signal_pred_labels = self.target_encoder.inverse_transform(y_signal_pred)
+                # 检查预测概率分布（若模型支持）
+                try:
+                    if hasattr(funnel.model, 'predict_proba'):
+                        # 获取特征用于概率预测
+                        X_features = []
+                        for feature in funnel.features:
+                            X_features.append(feature.transform(X_test))
+                        if not self.use_raw_data:
+                            X_features = np.concatenate(X_features, axis=1)
+                        
+                        y_probs = funnel.model.predict_proba(X_features)
+                        logger.info(f"===== 预测概率分布检查 =====")
+                        logger.info(f"概率输出形状（样本数, 类别数）: {y_probs.shape}")  # 关键：检查是否为5
+                        logger.info(f"第一个样本的概率分布: {y_probs[0][:5]}")  # 查看前5类概率
+                        logger.info(f"=========================")
+                except Exception as e:
+                    logger.warning(f"获取预测概率失败: {e}")
 
-                # 计算窗口级准确率
-                y_test = self.y[test_signal_key]
-                # 展平标签以匹配预测结果形状
-                y_test_flat = np.ravel(y_test)
+                # 逆编码预测结果（已为窗口级）
+                y_signal_pred_labels = self.target_encoder.inverse_transform(y_signal_pred_truncated)
+
+                # 计算窗口级准确率：确保长度一致
+                if len(y_signal_pred_labels) != len(y_test_flat):
+                    logger.warning(f"测试片段 {test_signal_key} 标签长度不匹配：预测{len(y_signal_pred_labels)} vs 真实{len(y_test_flat)}，进行长度对齐")
+                    if len(y_signal_pred_labels) < len(y_test_flat):
+                        pad_length = len(y_test_flat) - len(y_signal_pred_labels)
+                        y_signal_pred_labels = np.pad(
+                            y_signal_pred_labels,
+                            (0, pad_length),
+                            mode='edge'
+                        )
+                    else:
+                        y_signal_pred_labels = y_signal_pred_labels[:len(y_test_flat)]
+                
                 window_acc = accuracy_score(y_test_flat, y_signal_pred_labels)
                 fold_window_acc.append(window_acc)
                 logger.info(f"测试片段 {test_signal_key} 窗口级准确率：{window_acc:.4f}")
@@ -308,6 +408,10 @@ class Experiment:
 
                 # 保存预测结果
                 signal_predictions[test_signal_key] = [y_test_flat, y_signal_pred_labels]
+
+                logger.info("="*50)
+                logger.info(f"===== 片段 {test_signal_key} 处理完成 =====")
+                logger.info("="*50)
 
             # 记录当前折的窗口级平均准确率
             if fold_window_acc:
@@ -360,6 +464,15 @@ class Experiment:
             fold_metrics = self.evaluate(unique_labels=unique_labels, folds=folds, verbose=True)
 
         return fold_metrics
+
+    def _print_labels_in_chunks(self, labels, chunk_size=20):
+        """分块打印长标签列表"""
+        if isinstance(labels, (list, np.ndarray)):
+            for i in range(0, len(labels), chunk_size):
+                chunk = labels[i:i+chunk_size]
+                logger.info(f"  窗口 [{i}-{min(i+chunk_size-1, len(labels)-1)}]: {chunk}")
+        else:
+            logger.info(f"  标签数据格式异常: {type(labels)}")
 
     def save_predictions(self, fold_labels_predictions):
         '''保存预测结果，新增窗口级标签文件'''
