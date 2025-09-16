@@ -480,12 +480,37 @@ class DeepSoundBaseRNN:
         
         ffn.add(layers.Dense(self.output_size, activation=activations.softmax, name='ffn_output'))
 
-        # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
+        # 核心修改3：修复监控层，确保返回原始张量
         model = Sequential([
             layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
+            # 监控输入层 - 修正版
+            layers.Lambda(
+                lambda x: [
+                    tf.print("输入层形状:", tf.shape(x), "输入值范围:", tf.reduce_min(x), tf.reduce_max(x)),
+                    x  # 返回原始张量
+                ][1],  # 取列表中第二个元素（即x）作为输出
+                name='input_monitor'
+            ),
+            # CNN层及输出监控 - 修正版
             layers.TimeDistributed(cnn, name='time_distributed_cnn'),
+            layers.Lambda(
+                lambda x: [
+                    tf.print("CNN输出形状:", tf.shape(x)),
+                    tf.debugging.check_numerics(x, "CNN输出包含NaN/无穷大"),
+                    x  # 返回原始张量
+                ][2],  # 取列表中第三个元素（即x）作为输出
+                name='cnn_output_monitor'
+            ),
+            # GRU层及输入监控 - 修正版
+            layers.Lambda(
+                lambda x: [
+                    tf.print("GRU输入形状:", tf.shape(x)),
+                    x  # 返回原始张量
+                ][1],  # 取列表中第二个元素（即x）作为输出
+                name='gru_input_monitor'
+            ),
             layers.Bidirectional(
-                layers.GRU(64,  # 原128 -> 64
+                layers.GRU(64,
                            activation="tanh", 
                            return_sequences=True, 
                            dropout=0.3,
@@ -493,7 +518,33 @@ class DeepSoundBaseRNN:
                            kernel_initializer=HeUniform()),
                 name='bidirectional_gru'
             ),
-            layers.TimeDistributed(ffn, name='time_distributed_ffn')
+            # GRU输出监控 - 修正版
+            layers.Lambda(
+                lambda x: [
+                    tf.print("GRU输出形状:", tf.shape(x)),
+                    tf.debugging.check_numerics(x, "GRU输出包含NaN/无穷大"),
+                    x  # 返回原始张量
+                ][2],  # 取列表中第三个元素（即x）作为输出
+                name='gru_output_monitor'
+            ),
+            # FFN层及输入监控 - 修正版
+            layers.Lambda(
+                lambda x: [
+                    tf.print("FFN输入形状:", tf.shape(x)),
+                    x  # 返回原始张量
+                ][1],  # 取列表中第二个元素（即x）作为输出
+                name='ffn_input_monitor'
+            ),
+            layers.TimeDistributed(ffn, name='time_distributed_ffn'),
+            # FFN输出监控 - 修正版
+            layers.Lambda(
+                lambda x: [
+                    tf.print("FFN输出形状:", tf.shape(x)),
+                    tf.debugging.check_numerics(x, "FFN输出包含NaN/无穷大"),
+                    x  # 返回原始张量
+                ][2],  # 取列表中第三个元素（即x）作为输出
+                name='ffn_output_monitor'
+            )
         ])
 
         model.compile(
@@ -523,13 +574,9 @@ class DeepSoundBaseRNN:
             if isinstance(X, list) and len(X) == 1 and isinstance(X[0], (list, np.ndarray)):
                 X = X[0]
                 self.nan_detector.log_process("提取嵌套X样本")
-            if isinstance(y, list) and len(y) == 1 and isinstance(y[0], (list, np.ndarray)):
-                y = y[0]
-                self.nan_detector.log_process("提取嵌套y样本")
             
             # 检查NaN
             self.nan_detector.check_nan(X, "原始X数据")
-            self.nan_detector.check_nan(y, "原始y数据")
             
             # 转换为NumPy数组
             self.resource_logger.log("\n===== 转换样本为NumPy数组 =====")
@@ -570,6 +617,42 @@ class DeepSoundBaseRNN:
                 self.resource_logger.log(f"当前批次最长序列长度（窗口数）: {self.max_seq_len}")
             else:
                 raise ValueError("X必须是列表或NumPy数组")
+
+            # 新增：处理并检查标签y的维度和数值
+            self.resource_logger.log("\n===== 处理并检查标签y =====")
+            # 提取嵌套y样本（与X处理逻辑一致）
+            if isinstance(y, list) and len(y) == 1 and isinstance(y[0], (list, np.ndarray)):
+                y = y[0]
+                self.nan_detector.log_process("提取嵌套y样本")
+            
+            # 转换y为数组并检查长度
+            y_array: List[np.ndarray] = []
+            for i, label_seq in enumerate(y):
+                if isinstance(label_seq, list):
+                    label_array = np.array(label_seq, dtype='int32')  # 标签应为整数
+                    y_array.append(label_array)
+                elif isinstance(label_seq, np.ndarray):
+                    y_array.append(label_seq.astype('int32'))
+                else:
+                    raise TypeError(f"标签样本{i}类型错误: {type(label_seq)}")
+                
+                # 检查标签序列长度是否与X样本一致
+                x_len = len(X[i])
+                y_len = len(y_array[i])
+                if x_len != y_len:
+                    raise ValueError(
+                        f"样本{i}的X与y长度不匹配: X长度={x_len}, y长度={y_len}"
+                    )
+                self.resource_logger.log(f"样本{i}标签：形状={y_array[i].shape}，类别范围=[{y_array[i].min()}, {y_array[i].max()}]")
+                
+                # 检查标签是否超出输出维度范围
+                if y_array[i].max() >= self.output_size:
+                    raise ValueError(
+                        f"样本{i}标签值超出范围: 最大标签={y_array[i].max()}, 输出维度={self.output_size}"
+                    )
+            y = y_array
+            self.nan_detector.check_nan(y, "转换后的标签y")  # 检查标签中是否有NaN
+            self.resource_logger.log("===========================\n")
 
             # 同步填充X和y（均在末尾填充）
             target_len = self.max_seq_len
