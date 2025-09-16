@@ -64,14 +64,21 @@ def check_input_data(data, resource_logger, batch_num):
     # 处理可能的numpy类型
     if isinstance(batch_num_val, np.ndarray):
         batch_num_val = batch_num_val.item()  # 转换为Python标量
+    
+    # 确保批次号是整数或字符串
+    try:
+        batch_num_int = int(batch_num_val) if not isinstance(batch_num_val, str) else batch_num_val
+    except (ValueError, TypeError):
+        batch_num_int = str(batch_num_val)
 
-    # 用安全转换后的值进行日志输出
-    resource_logger.log(
-        f"输入数据检查 - 批次 {batch_num_val}:\n"
-        f"  数据范围: [{min_val:.6f}, {max_val:.6f}]\n"
-        f"  均值: {mean_val:.6f}, 标准差: {std_val:.6f}\n"
+    # 用安全转换后的值进行日志输出（避免直接格式化Tensor）
+    log_message = (
+        f"输入数据检查 - 批次 {batch_num_int}:\n"
+        f"  数据范围: [{min_val.numpy():.6f}, {max_val.numpy():.6f}]\n"
+        f"  均值: {mean_val.numpy():.6f}, 标准差: {std_val.numpy():.6f}\n"
         f"  含NaN: {has_nan.numpy()}, 含Inf: {has_inf.numpy()}"
     )
+    resource_logger.log(log_message)
     
     # 如果发现异常值，记录更多信息
     if has_nan.numpy() or has_inf.numpy():
@@ -480,8 +487,8 @@ class Conv1DWeightMonitor(Callback):
                 
                 self.resource_logger.log(
                     f"conv1d_5 权重监控 - 批次 {batch}:\n"
-                    f"  权重范围: [{kernel_min:.6f}, {kernel_max:.6f}]\n"
-                    f"  偏置范围: [{bias_min:.6f}, {bias_max:.6f}]\n"
+                    f"  权重范围: [{kernel_min.numpy():.6f}, {kernel_max.numpy():.6f}]\n"
+                    f"  偏置范围: [{bias_min.numpy():.6f}, {bias_max.numpy():.6f}]\n"
                     f"  权重含NaN: {has_nan_kernel.numpy()}, 偏置含NaN: {has_nan_bias.numpy()}"
                 )
             except Exception as e:
@@ -533,7 +540,7 @@ class Conv1DGradientMonitor(Callback):
                         
                         self.resource_logger.log(
                             f"conv1d_5 梯度监控 - 批次 {batch} - {var.name}:\n"
-                            f"  梯度范围: [{grad_min:.6f}, {grad_max:.6f}]\n"
+                            f"  梯度范围: [{grad_min.numpy():.6f}, {grad_max.numpy():.6f}]\n"
                             f"  含NaN: {has_nan.numpy()}, 含Inf: {has_inf.numpy()}"
                         )
             except Exception as e:
@@ -547,12 +554,14 @@ class DeepSoundBaseRNN:
                  n_epochs: int = 1400,
                  input_size: int = 1800,
                  set_sample_weights: bool = True,
-                 feature_scaling: bool = True):
+                 feature_scaling: bool = True,
+                 output_size: int = 4):  # 修复：添加output_size参数
         self.classes_: Optional[List[int]] = None
         self.padding_class: Optional[int] = None  # 填充类别标记
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
         self.input_size = input_size
         self.original_lengths: List[int] = []     # 存储训练样本原始长度
+        self.output_size = output_size  # 修复：存储output_size
 
         self.batch_size = batch_size
         self.n_epochs = n_epochs
@@ -1018,7 +1027,7 @@ class DeepSoundBaseRNN:
                 self.nan_detector.check_nan(X, "标准化后的X")
 
             # 确定输出维度
-            output_size = len(self.classes_) + 1 if self.classes_ else 4
+            output_size = len(self.classes_) + 1 if self.classes_ else self.output_size  # 使用初始化的output_size
             
             # 分布式训练设置 - 确保在策略作用域内构建模型
             if self.strategy is None:
@@ -1439,7 +1448,6 @@ class DeepSound(DeepSoundBaseRNN):
                  input_size: int = 4000,
                  output_size: int = 3,
                  n_epochs: int = 1400,
-                 training_reshape: bool = False,
                  set_sample_weights: bool = True,
                  feature_scaling: bool = True):
         super().__init__(
@@ -1447,7 +1455,6 @@ class DeepSound(DeepSoundBaseRNN):
             n_epochs=n_epochs,
             input_size=input_size,
             set_sample_weights=set_sample_weights,
-            feature_scaling=feature_scaling
+            feature_scaling=feature_scaling,
+            output_size=output_size  # 传递output_size到父类
         )
-        self.training_reshape = training_reshape
-        self.output_size = output_size
