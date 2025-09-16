@@ -32,6 +32,9 @@ from tensorflow.keras.initializers import HeUniform
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from chewbite_fusion.data.utils import NaNDetector
 import traceback
+import logging  # 确保导入logging模块
+
+logger = logging.getLogger('yaer')  # 初始化logger
 
 
 class ResourceLogger:
@@ -397,7 +400,8 @@ class DeepSoundBaseRNN:
                  set_sample_weights: bool = True,
                  feature_scaling: bool = True,
                  output_size: int = 4,  # 输出维度为4（0-3）
-                 optimizer_kwargs: dict = None):  # 接收优化器参数
+                 optimizer_kwargs: dict = None,
+                 loss=None):  # 新增loss参数
         self.classes_: Optional[List[int]] = None
         self.padding_class: int = 4  # 保留填充类别为4（不参与预测）
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
@@ -418,6 +422,7 @@ class DeepSoundBaseRNN:
         self.strategy: Optional[tf.distribute.Strategy] = None
         self.resource_logger = ResourceLogger()
         self.optimizer_kwargs = optimizer_kwargs or {}  # 优化器参数
+        self.loss = loss  # 保存损失函数
         os.makedirs(self.model_save_path, exist_ok=True)
 
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
@@ -484,9 +489,15 @@ class DeepSoundBaseRNN:
         ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
         ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
         
-        ffn.add(layers.Dense(self.output_size, activation=activations.softmax, name='ffn_output'))  # 输出维度为4
+        # 修改输出层初始化方式：使用glorot_uniform
+        ffn.add(layers.Dense(
+            self.output_size, 
+            activation=activations.softmax, 
+            kernel_initializer='glorot_uniform',  # 替换原HeUniform，更适合输出层
+            name='ffn_output'
+        ))
 
-        # 模型主结构（GRU前新增BatchNormalization）
+        # 模型主结构（GRU前后均添加BatchNormalization）
         model = Sequential([
             layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
             layers.Masking(mask_value=-1.0, name='masking_layer'),  # 掩码层忽略填充特征
@@ -501,21 +512,55 @@ class DeepSoundBaseRNN:
                            kernel_initializer=HeUniform()),
                 name='bidirectional_gru'
             ),
+            layers.BatchNormalization(name='post_gru_bn'),  # 新增：GRU输出后添加批归一化
+            # 新增：检查GRU输出是否有NaN
+            layers.Lambda(lambda x: tf.debugging.check_numerics(x, "GRU output contains NaN")),
             layers.TimeDistributed(ffn, name='time_distributed_ffn')
         ])
 
-        # 掩码损失函数，忽略填充标签4
+        # 增强版掩码损失函数，添加数值检查
         def masked_loss(y_true, y_pred):
-            mask = tf.cast(y_true != self.padding_class, tf.float32)  # 填充标签位置掩码为0
+            # 检查标签是否有超出范围的值
+            y_true_np = tf.keras.backend.eval(y_true)
+            if np.any(y_true_np < 0) or np.any(y_true_np >= self.output_size):
+                invalid_mask = (y_true_np < 0) | (y_true_np >= self.output_size)
+                logger.error(f"发现无效标签值！标签范围: [{np.min(y_true_np)}, {np.max(y_true_np)}]")
+                logger.error(f"无效标签示例: {y_true_np[invalid_mask][:5]}")
+            
+            # 检查模型输出是否有NaN/无穷大
+            y_pred_np = tf.keras.backend.eval(y_pred)
+            if np.isnan(y_pred_np).any():
+                logger.error(f"模型输出存在NaN值！NaN数量: {np.isnan(y_pred_np).sum()}")
+            if np.isinf(y_pred_np).any():
+                logger.error(f"模型输出存在无穷大值！无穷大数量: {np.isinf(y_pred_np).sum()}")
+            
+            # 原始掩码逻辑
+            mask = tf.cast(y_true != self.padding_class, tf.float32)
             loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
-            return tf.reduce_sum(loss * mask) / tf.reduce_sum(mask)  # 仅计算有效标签的平均损失
+            
+            # 检查损失是否包含NaN
+            loss = tf.debugging.check_numerics(loss, "Loss contains NaN or Inf")
+            
+            # 处理可能的除零情况，添加极小值防止除以0
+            total_mask = tf.reduce_sum(mask) + 1e-8
+            return tf.reduce_sum(loss * mask) / total_mask
 
-        # 使用传入的优化器参数（支持动态调整学习率和梯度裁剪）
-        optimizer = Adam(**self.optimizer_kwargs)
+        # 优化器参数调整：降低学习率 + 梯度裁剪
+        # 设置默认优化器参数
+        optimizer_defaults = {
+            'learning_rate': 1e-5,  # 降低初始学习率
+            'clipvalue': 1.0  # 梯度裁剪，限制最大梯度值
+        }
+        # 合并用户传入的参数（用户参数优先级更高）
+        optimizer_kwargs = {** optimizer_defaults, **self.optimizer_kwargs}
+        optimizer = Adam(** optimizer_kwargs)
+
+        # 如果未传入loss，则使用默认的掩码损失
+        loss_function = self.loss if self.loss is not None else masked_loss
 
         model.compile(
             optimizer=optimizer,
-            loss=masked_loss,  # 使用自定义掩码损失
+            loss=loss_function,  # 使用传入的或默认的掩码损失
             weighted_metrics=['accuracy']
         )
 
@@ -1078,7 +1123,8 @@ class DeepSound(DeepSoundBaseRNN):
                  training_reshape: bool = False,
                  set_sample_weights: bool = True,
                  feature_scaling: bool = True,
-                 optimizer_kwargs: dict = None):
+                 optimizer_kwargs: dict = None,
+                 loss=None):  # 新增loss参数
         super().__init__(
             batch_size=batch_size,
             n_epochs=n_epochs,
@@ -1086,6 +1132,7 @@ class DeepSound(DeepSoundBaseRNN):
             set_sample_weights=set_sample_weights,
             feature_scaling=feature_scaling,
             output_size=output_size,
-            optimizer_kwargs=optimizer_kwargs  # 传递优化器参数
+            optimizer_kwargs=optimizer_kwargs,
+            loss=loss  # 传递loss参数给父类
         )
         self.training_reshape = training_reshape

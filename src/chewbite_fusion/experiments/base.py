@@ -407,7 +407,20 @@ class Experiment:
                     else:
                         y_signal_pred_labels = y_signal_pred_labels[:len(y_test_flat)]
                 
-                window_acc = accuracy_score(y_test_flat, y_signal_pred_labels)
+                # 过滤填充类别4（只保留有效标签0-3）
+                # 将标签编码为数字以便过滤
+                y_test_enc = self.target_encoder.transform(y_test_flat)
+                y_pred_enc = self.target_encoder.transform(y_signal_pred_labels)
+                
+                valid_mask = (y_test_enc != 4)
+                if np.sum(valid_mask) == 0:
+                    logger.warning("当前片段无有效标签（全为填充值）")
+                    window_acc = 0.0
+                else:
+                    valid_preds = y_pred_enc[valid_mask]
+                    valid_trues = y_test_enc[valid_mask]
+                    window_acc = np.mean(valid_preds == valid_trues)
+                
                 fold_window_acc.append(window_acc)
                 logger.info(f"测试片段 {test_signal_key} 窗口级准确率：{window_acc:.4f}")
                 logger.debug(f"窗口级分类报告：\n{classification_report(y_test_flat, y_signal_pred_labels)}")

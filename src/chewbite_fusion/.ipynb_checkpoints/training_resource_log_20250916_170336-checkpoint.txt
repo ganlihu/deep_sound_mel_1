@@ -1,0 +1,253 @@
+[2025-09-16 17:03:36] ============================================================
+[2025-09-16 17:03:36] 【训练数据信息】
+[2025-09-16 17:03:36] 原始X类型: <class 'list'>, 长度: 1
+[2025-09-16 17:03:36] 原始y类型: <class 'list'>, 长度: 42
+[2025-09-16 17:03:36] ============================================================
+[2025-09-16 17:03:36] 
+===== 转换样本为NumPy数组 =====
+[2025-09-16 17:03:36] 样本0：已从list转换为数组，形状=(288, 1800, 1)，原始长度=288
+[2025-09-16 17:03:36] 样本1：已从list转换为数组，形状=(227, 1800, 1)，原始长度=227
+[2025-09-16 17:03:36] 样本2：已从list转换为数组，形状=(381, 1800, 1)，原始长度=381
+[2025-09-16 17:03:36] 样本3：已从list转换为数组，形状=(428, 1800, 1)，原始长度=428
+[2025-09-16 17:03:36] 样本4：已从list转换为数组，形状=(406, 1800, 1)，原始长度=406
+[2025-09-16 17:03:36] 样本5：已从list转换为数组，形状=(125, 1800, 1)，原始长度=125
+[2025-09-16 17:03:36] 样本6：已从list转换为数组，形状=(324, 1800, 1)，原始长度=324
+[2025-09-16 17:03:36] 样本7：已从list转换为数组，形状=(202, 1800, 1)，原始长度=202
+[2025-09-16 17:03:36] 样本8：已从list转换为数组，形状=(137, 1800, 1)，原始长度=137
+[2025-09-16 17:03:36] 样本9：已从list转换为数组，形状=(276, 1800, 1)，原始长度=276
+[2025-09-16 17:03:36] 样本10：已从list转换为数组，形状=(417, 1800, 1)，原始长度=417
+[2025-09-16 17:03:36] 样本11：已从list转换为数组，形状=(455, 1800, 1)，原始长度=455
+[2025-09-16 17:03:36] 样本12：已从list转换为数组，形状=(178, 1800, 1)，原始长度=178
+[2025-09-16 17:03:36] 样本13：已从list转换为数组，形状=(446, 1800, 1)，原始长度=446
+[2025-09-16 17:03:36] 样本14：已从list转换为数组，形状=(280, 1800, 1)，原始长度=280
+[2025-09-16 17:03:36] 样本15：已从list转换为数组，形状=(835, 1800, 1)，原始长度=835
+[2025-09-16 17:03:36] 样本16：已从list转换为数组，形状=(144, 1800, 1)，原始长度=144
+[2025-09-16 17:03:36] 样本17：已从list转换为数组，形状=(238, 1800, 1)，原始长度=238
+[2025-09-16 17:03:36] 样本18：已从list转换为数组，形状=(335, 1800, 1)，原始长度=335
+[2025-09-16 17:03:36] 样本19：已从list转换为数组，形状=(475, 1800, 1)，原始长度=475
+[2025-09-16 17:03:36] 样本20：已从list转换为数组，形状=(351, 1800, 1)，原始长度=351
+[2025-09-16 17:03:36] 样本21：已从list转换为数组，形状=(382, 1800, 1)，原始长度=382
+[2025-09-16 17:03:36] 样本22：已从list转换为数组，形状=(635, 1800, 1)，原始长度=635
+[2025-09-16 17:03:36] 样本23：已从list转换为数组，形状=(337, 1800, 1)，原始长度=337
+[2025-09-16 17:03:36] 样本24：已从list转换为数组，形状=(537, 1800, 1)，原始长度=537
+[2025-09-16 17:03:36] 样本25：已从list转换为数组，形状=(347, 1800, 1)，原始长度=347
+[2025-09-16 17:03:36] 样本26：已从list转换为数组，形状=(362, 1800, 1)，原始长度=362
+[2025-09-16 17:03:36] 样本27：已从list转换为数组，形状=(355, 1800, 1)，原始长度=355
+[2025-09-16 17:03:36] 样本28：已从list转换为数组，形状=(192, 1800, 1)，原始长度=192
+[2025-09-16 17:03:36] 样本29：已从list转换为数组，形状=(462, 1800, 1)，原始长度=462
+[2025-09-16 17:03:36] 样本30：已从list转换为数组，形状=(784, 1800, 1)，原始长度=784
+[2025-09-16 17:03:36] 样本31：已从list转换为数组，形状=(479, 1800, 1)，原始长度=479
+[2025-09-16 17:03:36] 样本32：已从list转换为数组，形状=(271, 1800, 1)，原始长度=271
+[2025-09-16 17:03:36] 样本33：已从list转换为数组，形状=(446, 1800, 1)，原始长度=446
+[2025-09-16 17:03:36] 样本34：已从list转换为数组，形状=(539, 1800, 1)，原始长度=539
+[2025-09-16 17:03:36] 样本35：已从list转换为数组，形状=(443, 1800, 1)，原始长度=443
+[2025-09-16 17:03:36] 样本36：已从list转换为数组，形状=(201, 1800, 1)，原始长度=201
+[2025-09-16 17:03:36] 样本37：已从list转换为数组，形状=(294, 1800, 1)，原始长度=294
+[2025-09-16 17:03:36] 样本38：已从list转换为数组，形状=(403, 1800, 1)，原始长度=403
+[2025-09-16 17:03:36] 样本39：已从list转换为数组，形状=(697, 1800, 1)，原始长度=697
+[2025-09-16 17:03:36] 样本40：已从list转换为数组，形状=(810, 1800, 1)，原始长度=810
+[2025-09-16 17:03:36] 样本41：已从list转换为数组，形状=(714, 1800, 1)，原始长度=714
+[2025-09-16 17:03:36] ===========================
+
+[2025-09-16 17:03:36] 当前批次最长序列长度（窗口数）: 835
+[2025-09-16 17:03:37] X填充后形状: (42, 835, 1800, 1)
+[2025-09-16 17:03:37] 检测到的类别: [0, 1, 2, 3], 填充类别编号: 4
+[2025-09-16 17:03:37] y填充后形状: (42, 835)
+[2025-09-16 17:03:37] X填充值替换为均值: 0.0000
+[2025-09-16 17:03:38] 标准化后X统计: min=-3.0000, max=3.0000
+[2025-09-16 17:03:40] 已检测到 3 个GPU，将用于分布式训练
+[2025-09-16 17:03:40] 模型构建 - 输出维度output_size=4，最大序列长度max_seq_len=835
+[2025-09-16 17:03:45] 
+模型初始化完成（多GPU支持），结构如下：
+[2025-09-16 17:03:45] Model: "sequential"
+[2025-09-16 17:03:45] _________________________________________________________________
+[2025-09-16 17:03:45]  Layer (type)                Output Shape              Param #   
+[2025-09-16 17:03:45] =================================================================
+[2025-09-16 17:03:45]  masking_layer (Masking)     (None, 835, 1800, 1)      0         
+[2025-09-16 17:03:45]                                                                  
+[2025-09-16 17:03:45]  time_distributed_cnn (TimeD  (None, 835, 1600)        14752     
+[2025-09-16 17:03:45]  istributed)                                                     
+[2025-09-16 17:03:45]                                                                  
+[2025-09-16 17:03:45]  pre_gru_bn (BatchNormalizat  (None, 835, 1600)        6400      
+[2025-09-16 17:03:45]  ion)                                                            
+[2025-09-16 17:03:45]                                                                  
+[2025-09-16 17:03:45]  bidirectional_gru (Bidirect  (None, 835, 128)         639744    
+[2025-09-16 17:03:45]  ional)                                                          
+[2025-09-16 17:03:45]                                                                  
+[2025-09-16 17:03:45]  lambda (Lambda)             (None, 835, 128)          0         
+[2025-09-16 17:03:45]                                                                  
+[2025-09-16 17:03:45]  time_distributed_ffn (TimeD  (None, 835, 4)           25796     
+[2025-09-16 17:03:45]  istributed)                                                     
+[2025-09-16 17:03:45]                                                                  
+[2025-09-16 17:03:45] =================================================================
+[2025-09-16 17:03:45] Total params: 686,692
+[2025-09-16 17:03:45] Trainable params: 682,852
+[2025-09-16 17:03:45] Non-trainable params: 3,840
+[2025-09-16 17:03:45] _________________________________________________________________
+[2025-09-16 17:03:45] 监控批次形状 - X: (8, 835, 1800, 1), y: (8, 835)
+[2025-09-16 17:03:45] 使用验证集: True, 验证比例: 0.2
+[2025-09-16 17:03:45] 
+===== 类别权重 =====
+[2025-09-16 17:03:45] 类别 0 (普通类别): 样本数=1767, 权重=2.4363
+[2025-09-16 17:03:45] 类别 1 (普通类别): 样本数=6427, 权重=1.3527
+[2025-09-16 17:03:45] 类别 2 (普通类别): 样本数=3480, 权重=1.8400
+[2025-09-16 17:03:45] 类别 3 (普通类别): 样本数=4964, 权重=1.5504
+[2025-09-16 17:03:45] 类别 4 (填充类别): 样本数=18432, 权重=0.0000
+[2025-09-16 17:03:45] ====================
+
+[2025-09-16 17:03:45] 样本权重范围: [0.0000, 2.4363]
+[2025-09-16 17:03:45] 
+【开始训练】样本数: 42, 批次大小: 8, GPU数量: 3
+[2025-09-16 17:05:53] 训练过程出错: Graph execution error:
+
+Detected at node 'masked_loss/SparseSoftmaxCrossEntropyWithLogits/SparseSoftmaxCrossEntropyWithLogits/CheckNumericsV2' defined at (most recent call last):
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/threading.py", line 973, in _bootstrap
+      self._bootstrap_inner()
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/threading.py", line 1016, in _bootstrap_inner
+      self.run()
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/site-packages/keras/engine/training.py", line 1249, in run_step
+      outputs = model.train_step(data)
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/site-packages/keras/engine/training.py", line 1051, in train_step
+      loss = self.compute_loss(x, y, y_pred, sample_weight)
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/site-packages/keras/engine/training.py", line 1109, in compute_loss
+      return self.compiled_loss(
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/site-packages/keras/engine/compile_utils.py", line 265, in __call__
+      loss_value = loss_obj(y_t, y_p, sample_weight=sw)
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/site-packages/keras/losses.py", line 142, in __call__
+      losses = call_fn(y_true, y_pred)
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/site-packages/keras/losses.py", line 268, in call
+      return ag_fn(y_true, y_pred, **self._fn_kwargs)
+    File "/root/user/DeepSound2/src/chewbite_fusion/models/deep_sound.py", line 517, in masked_loss
+      loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/site-packages/keras/losses.py", line 2078, in sparse_categorical_crossentropy
+      return backend.sparse_categorical_crossentropy(
+    File "/root/miniconda3/envs/deep-sound/lib/python3.10/site-packages/keras/backend.py", line 5660, in sparse_categorical_crossentropy
+      res = tf.nn.sparse_softmax_cross_entropy_with_logits(
+Node: 'masked_loss/SparseSoftmaxCrossEntropyWithLogits/SparseSoftmaxCrossEntropyWithLogits/CheckNumericsV2'
+4 root error(s) found.
+  (0) INVALID_ARGUMENT:  
+
+!!! Detected Infinity or NaN in output 0 of graph op "SparseSoftmaxCrossEntropyWithLogits" (# of outputs: 2) !!!
+  dtype: <dtype: 'float32'>
+  shape: (None,)
+
+  Input tensors (2):
+         0: Tensor("masked_loss/SparseSoftmaxCrossEntropyWithLogits/Reshape:0", shape=(None, None), dtype=float32, device=/job:localhost/replica:0/task:0/device:GPU:0)
+         1: Tensor("masked_loss/SparseSoftmaxCrossEntropyWithLogits/Reshape_1:0", shape=(None,), dtype=int64, device=/job:localhost/replica:0/task:0/device:GPU:0)
+  Graph name: "train_function"
+
+  Stack trace of op's creation ("->": inferred user code):
+    + ...conda3/envs/deep-sound/lib/python3.10/threading.py (L973) _bootstrap
+ -> |   self._bootstrap_inner()
+    + ...conda3/envs/deep-sound/lib/python3.10/threading.py (L1016) _bootstrap_inner
+ -> |   self.run()
+    + ...kages/tensorflow/python/distribute/mirrored_run.py (L387) run
+    |   self.main_result = self.main_fn(*self.main_args, **self.main_kwargs)
+    + .../python3.10/site-packages/keras/engine/training.py (L1249) run_step
+ -> |   outputs = model.train_step(data)
+    + .../python3.10/site-packages/keras/engine/training.py (L1051) train_step
+ -> |   loss = self.compute_loss(x, y, y_pred, sample_weight)
+    + .../python3.10/site-packages/keras/engine/training.py (L1109) compute_loss
+ -> |   return self.compiled_loss(
+    + ...on3.10/site-packages/keras/engine/compile_utils.py (L265) __call__
+ -> |   loss_value = loss_obj(y_t, y_p, sample_weight=sw)
+    + ...sound/lib/python3.10/site-packages/keras/losses.py (L142) __call__
+ -> |   losses = call_fn(y_true, y_pred)
+    + ...sound/lib/python3.10/site-packages/keras/losses.py (L268) call
+ -> |   return ag_fn(y_true, y_pred, **self._fn_kwargs)
+    + ...eepSound2/src/chewbite_fusion/models/deep_sound.py (L517) masked_loss
+ -> |   loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+    + ...packages/tensorflow/python/util/traceback_utils.py (L150) error_handler
+    |   return fn(*args, **kwargs)
+    + ...0/site-packages/tensorflow/python/util/dispatch.py (L1176) op_dispatch_handler
+    |   return dispatch_target(*args, **kwargs)
+    + ...sound/lib/python3.10/site-packages/keras/losses.py (L2078) sparse_categorical_crossentropy
+ -> |   return backend.sparse_categorical_crossentropy(
+    + ...packages/tensorflow/python/util/traceback_utils.py (L150) error_handler
+    |   return fn(*args, **kwargs)
+    + ...0/site-packages/tensorflow/python/util/dispatch.py (L1176) op_dispatch_handler
+    |   return dispatch_target(*args, **kwargs)
+    + ...ound/lib/python3.10/site-packages/keras/backend.py (L5660) sparse_categorical_crossentropy
+ -> |   res = tf.nn.sparse_softmax_cross_entropy_with_logits(
+    + ...packages/tensorflow/python/util/traceback_utils.py (L150) error_handler
+    |   return fn(*args, **kwargs)
+    + ...0/site-packages/tensorflow/python/util/dispatch.py (L1176) op_dispatch_handler
+    |   return dispatch_target(*args, **kwargs)
+    + ...3.10/site-packages/tensorflow/python/ops/nn_ops.py (L4453) sparse_softmax_cross_entropy_with_logits_v2
+    |   return sparse_softmax_cross_entropy_with_logits(
+    + ...packages/tensorflow/python/util/traceback_utils.py (L150) error_handler
+    |   return fn(*args, **kwargs)
+    + ...0/site-packages/tensorflow/python/util/dispatch.py (L1176) op_dispatch_handler
+    |   return dispatch_target(*args, **kwargs)
+    + ...3.10/site-packages/tensorflow/python/ops/nn_ops.py (L4386) sparse_softmax_cross_entropy_with_logits
+    |   cost = _sparse_softmax_cross_entropy_with_rank_2_logits(
+    + ...3.10/site-packages/tensorflow/python/ops/nn_ops.py (L4268) _sparse_softmax_cross_entropy_with_rank_2_logits
+    |   cost, _ = gen_nn_ops.sparse_softmax_cross_entropy_with_logits(
+    + .../site-packages/tensorflow/python/ops/gen_nn_ops.py (L11929) sparse_softmax_cross_entropy_with_logits
+    |   _, _, _op, _outputs = _op_def_library._apply_op_helper(
+    + ...ages/tensorflow/python/framework/op_def_library.py (L795) _apply_op_helper
+    |   op = g._create_op_internal(op_type_name, inputs, dtypes=None,
+    + ...packages/tensorflow/python/framework/func_graph.py (L707) _create_op_internal
+    |   return super()._create_op_internal(  # pylint: disable=protected-access
+    + ...0/site-packages/tensorflow/python/framework/ops.py (L3814) _create_op_internal
+    |   ret = Operation(
+
+ : Tensor had NaN values
+	 [[{{node masked_loss/SparseSoftmaxCrossEntropyWithLogits/SparseSoftmaxCrossEntropyWithLogits/CheckNumericsV2}}]]
+	 [[replica_1/sequential/time_distributed_cnn/bn_5/Cast_1/ReadVariableOp/CheckNumericsV2/_1693]]
+	 [[NcclAllReduce_1/CheckNumericsV2/_3301]]
+	 [[div_no_nan/ReadVariableOp/_3124]]
+  (1) INVALID_ARGUMENT:  
+
+!!! Detected Infinity or NaN in output 0 of graph op "SparseSoftmaxCrossEntropyWithLogits" (# of outputs: 2) !!!
+  dtype: <dtype: 'float32'>
+  shape: (None,)
+
+  Input tensors (2):
+         0: Tensor("masked_loss/SparseSoftmaxCrossEntropyWithLogits/Reshape:0", shape=(None, None), dtype=float32, device=/job:localhost/replica:0/task:0/device:GPU:0)
+         1: Tensor("masked_loss/SparseSoftmaxCrossEntropyWithLogits/Reshape_1:0", shape=(None,), dtype=int64, device=/job:localhost/replica:0/task:0/device:GPU:0)
+  Graph name: "train_function"
+
+  Stack trace of op's creation ("->": inferred user code):
+    + ...conda3/envs/deep-sound/lib/python3.10/threading.py (L973) _bootstrap
+ -> |   self._bootstrap_inner()
+    + ...conda3/envs/deep-sound/lib/python3.10/threading.py (L1016) _bootstrap_inner
+ -> |   self.run()
+    + ...kages/tensorflow/python/distribute/mirrored_run.py (L387) run
+    |   self.main_result = self.main_fn(*self.main_args, **self.main_kwargs)
+    + .../python3.10/site-packages/keras/engine/training.py (L1249) run_step
+ -> |   outputs = model.train_step(data)
+    + .../python3.10/site-packages/keras/engine/training.py (L1051) train_step
+ -> |   loss = self.compute_loss(x, y, y_pred, sample_weight)
+    + .../python3.10/site-packages/keras/engine/training.py (L1109) compute_loss
+ -> |   return self.compiled_loss(
+    + ...on3.10/site-packages/keras/engine/compile_utils.py (L265) __call__
+ -> |   loss_value = loss_obj(y_t, y_p, sample_weight=sw)
+    + ...sound/lib/python3.10/site-packages/keras/losses.py (L142) __call__
+ -> |   losses = call_fn(y_true, y_pred)
+    + ...sound/lib/python3.10/site-packages/keras/losses.py (L268) call
+ -> |   return ag_fn(y_true, y_pred, **self._fn_kwargs)
+    + ...eepSound2/src/chewbite_fusion/models/deep_sound.py (L517) masked_loss
+ -> |   loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+    + ...packages/tensorflow/python/util/traceback_utils.py (L150) error_handler
+    |   return fn(*args, **kwargs)
+    + ...0/site-packages/tensorflow/python/util/dispatch.py (L1176) op_dispatch_handler
+    |   return dispatch_target(*args, **kwargs)
+    + ...sound/lib/python3.10/site-packages/keras/losses.py (L2078) sparse_categorical_crossentropy
+ -> |   return backend.sparse_categorical_crossentropy(
+    + ...packages/tensorflow/python/util/traceback_utils.py (L150) error_handler
+    |   return fn(*args, **kwargs)
+    + ...0/site-packages/tensorflow/python/util/dispatch.py (L1176) op_dispatch_handler
+    |   return dispatch_target(*args, **kwargs)
+    + ...ound/lib/python3.10/site-packages/keras/backend.py (L5660) sparse_categorical_crossentropy
+ -> |   res = tf.nn.sparse_softmax_cross_entropy_with_logits(
+    + ...packages/tensorflow/python/util/traceback_utils.py (L150) error_handler
+    |   return fn(*args, **kwargs)
+    + ...0/site-packages/tensorflow/python/util/dispatch.py (L1176) op_dispatch_handler
+    |   return dispatch_target(*args, **kwargs)
+    + ...3.10/site-packages/tensorflow/python/ops/nn_ops.py (L4453) sparse_softmax_cross_entropy_with_logits_v2
+    |   return sparse_softmax_cross_entropy_with_logits(
+    + ...packages/tensorflow/python/util/traceback_utils.py (L150) error_handler
+    |   return fn(*args, **kwargs)
+    + ...0/site-packages/tensorflow/python/util/dispatch.py (L1176) op_dispatch_handler
+    |   return dispatch_target(*args, [Op:__inference_train_function_88098]
