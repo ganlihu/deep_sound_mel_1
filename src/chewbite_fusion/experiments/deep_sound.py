@@ -90,6 +90,21 @@ def deep_sound():
             all_encoded_labels.extend(labels)
         unique_encoded_labels = np.unique(all_encoded_labels)
         
+        # 新增：全量标签最小值检查
+        all_encoded_flat = np.hstack(all_encoded_labels)  # 展平所有编码标签
+        min_label = np.min(all_encoded_flat)
+        if min_label < 0:
+            logger.error(f"编码后标签存在负值！最小值: {min_label}，异常标签: {np.unique(all_encoded_flat[all_encoded_flat < 0])}")
+            raise ValueError("标签编码出现负值，请检查LabelEncoder逻辑")
+        
+        # 新增：打印'no-event'对应的编码值
+        no_event_class = 'no-event'  # 与base.py保持一致
+        if no_event_class in label_encoder.classes_:
+            no_event_encoded = label_encoder.transform([no_event_class])[0]
+            logger.info(f"'no-event' 编码值: {no_event_encoded}")  # 确认是否为非负值
+        else:
+            logger.warning(f"'no-event' 未在标签集中出现")
+        
         if not np.issubdtype(unique_encoded_labels.dtype, np.integer):
             raise ValueError(f"编码后标签仍非整数，实际类型: {unique_encoded_labels.dtype}")
         

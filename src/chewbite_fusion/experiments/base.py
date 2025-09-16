@@ -233,12 +233,16 @@ class Experiment:
                 y_train.extend(y_augmented)
                 logger.info(f"数据增强后训练样本数: {len(X_train)}")
 
-                # 数据增强后标签检查
+                # 数据增强后标签检查（增强版）
                 all_augmented_labels = np.hstack(y_train) if isinstance(y_train[0], (list, np.ndarray)) else y_train
                 unique_augmented = np.unique(all_augmented_labels)
+                min_augmented = np.min(all_augmented_labels)  # 新增：计算最小值
                 logger.info(f"===== 数据增强后标签检查 =====")
                 logger.info(f"增强后去重标签: {unique_augmented}")
                 logger.info(f"增强后标签数量: {len(unique_augmented)}")
+                logger.info(f"增强后标签最小值: {min_augmented}")  # 新增：打印最小值
+                if min_augmented < 0:  # 新增：负值检查
+                    logger.error(f"数据增强后出现负标签！异常值: {np.unique(all_augmented_labels[all_augmented_labels < 0])}")
                 logger.info(f"=========================")
 
             # 标签编码
