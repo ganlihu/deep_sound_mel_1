@@ -395,12 +395,14 @@ class DeepSoundBaseRNN:
                  n_epochs: int = 1400,
                  input_size: int = 1800,
                  set_sample_weights: bool = True,
-                 feature_scaling: bool = True):
+                 feature_scaling: bool = True,
+                 output_size: int = 5):  # 修正1：输出维度改为5（0-4）
         self.classes_: Optional[List[int]] = None
-        self.padding_class: Optional[int] = None  # 填充类别标记
+        self.padding_class: int = 4  # 修正2：显式定义填充类别为4
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
         self.input_size = input_size
         self.original_lengths: List[int] = []     # 存储训练样本原始长度
+        self.output_size = output_size  # 存储动态输出维度
 
         self.batch_size = batch_size
         self.n_epochs = n_epochs
@@ -416,13 +418,16 @@ class DeepSoundBaseRNN:
         self.resource_logger = ResourceLogger()
         os.makedirs(self.model_save_path, exist_ok=True)
 
-    def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
+    def _build_model(self, max_seq_len: int, output_size: int = 5) -> keras.Model:  # 修正3：默认输出维度改为5
         """构建模型结构，优化维度转换和正则化（减少显存占用）"""
+        # 打印模型输出维度
+        self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={max_seq_len}")
+        
         # 核心修改1：减少CNN卷积核数量，降低特征维度
         layers_config = [
-            (16, 18, 3, activations.relu),  # 原32 -> 16
-            (16, 9, 1, activations.relu),   # 原32 -> 16
-            (32, 3, 1, activations.relu)    # 原64 -> 32
+            (16, 18, 3, activations.relu),
+            (16, 9, 1, activations.relu),
+            (32, 3, 1, activations.relu)
         ]
 
         # CNN子网络 - 用于特征提取
@@ -468,24 +473,24 @@ class DeepSoundBaseRNN:
 
         # 核心修改2：减少FFN维度，降低参数数量
         ffn = Sequential(name='ffn_subnetwork')
-        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))  # 原256 -> 128
+        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))
         ffn.add(layers.BatchNormalization(name='ffn_bn_1'))
         ffn.add(layers.Activation(activations.relu, name='ffn_act_1'))
         ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_1'))
         
-        ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))   # 原128 -> 64
+        ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))
         ffn.add(layers.BatchNormalization(name='ffn_bn_2'))
         ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
         ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
         
-        ffn.add(layers.Dense(self.output_size, activation=activations.softmax, name='ffn_output'))
+        ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
 
         # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
         model = Sequential([
             layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
             layers.TimeDistributed(cnn, name='time_distributed_cnn'),
             layers.Bidirectional(
-                layers.GRU(64,  # 原128 -> 64
+                layers.GRU(64,
                            activation="tanh", 
                            return_sequences=True, 
                            dropout=0.3,
@@ -496,13 +501,19 @@ class DeepSoundBaseRNN:
             layers.TimeDistributed(ffn, name='time_distributed_ffn')
         ])
 
+        # 修正4：添加掩码损失函数，忽略填充标签4
+        def masked_loss(y_true, y_pred):
+            mask = tf.cast(y_true != self.padding_class, tf.float32)  # 填充标签位置掩码为0
+            loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+            return tf.reduce_sum(loss * mask) / tf.reduce_sum(mask)  # 仅计算有效标签的平均损失
+
         model.compile(
             optimizer=Adam(
                 learning_rate=1e-4,
                 clipnorm=1.0,
                 clipvalue=0.5
             ),
-            loss='sparse_categorical_crossentropy',
+            loss=masked_loss,  # 使用自定义掩码损失
             weighted_metrics=['accuracy']
         )
 
@@ -618,7 +629,7 @@ class DeepSoundBaseRNN:
 
             # 处理标签和填充类别
             self.classes_ = list(set(np.concatenate(y))) if y and isinstance(y[0], (list, np.ndarray)) else []
-            self.padding_class = max(self.classes_) + 1 if self.classes_ else 0
+            self.padding_class = 4  # 显式固定填充类别为4
             self.resource_logger.log(f"检测到的类别: {self.classes_}, 填充类别编号: {self.padding_class}")
             
             # 填充标签（与X同步在末尾填充）
@@ -652,8 +663,8 @@ class DeepSoundBaseRNN:
                 self.resource_logger.log(f"标准化后X统计: min={np.min(X):.4f}, max={np.max(X):.4f}")
                 self.nan_detector.check_nan(X, "标准化后的X")
 
-            # 确定输出维度
-            output_size = len(self.classes_) + 1 if self.classes_ else 4
+            # 确定输出维度（固定为5）
+            output_size = 5
             
             # 分布式训练设置
             self.strategy = tf.distribute.MirroredStrategy()
@@ -1052,19 +1063,21 @@ class DeepSoundBaseRNN:
 class DeepSound(DeepSoundBaseRNN):
     """DeepSound模型，继承自RNN基础类"""
     def __init__(self,
-                 batch_size: int = 5,  # 可结合之前修改的experiments/deep_sound.py进一步减小
-                 input_size: int = 4000,
-                 output_size: int = 3,
+                 batch_size: int = 5,  # 可结合实验配置进一步减小
+                 input_size: int = 1800,  # 与实验配置保持一致
+                 output_size: int = 5,  # 修正为5类（含填充）
                  n_epochs: int = 1400,
                  training_reshape: bool = False,
                  set_sample_weights: bool = True,
-                 feature_scaling: bool = True):
+                 feature_scaling: bool = True,
+                 optimizer_kwargs: dict = None):  # 支持优化器参数传入
         super().__init__(
             batch_size=batch_size,
             n_epochs=n_epochs,
             input_size=input_size,
             set_sample_weights=set_sample_weights,
-            feature_scaling=feature_scaling
+            feature_scaling=feature_scaling,
+            output_size=output_size  # 传递输出维度
         )
         self.training_reshape = training_reshape
-        self.output_size = output_size
+        self.optimizer_kwargs = optimizer_kwargs or {}  # 优化器参数
