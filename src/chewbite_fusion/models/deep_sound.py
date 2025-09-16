@@ -32,9 +32,6 @@ from tensorflow.keras.initializers import HeUniform
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from chewbite_fusion.data.utils import NaNDetector
 import traceback
-import logging  # 确保导入logging模块
-
-logger = logging.getLogger('yaer')  # 初始化logger
 
 
 class ResourceLogger:
@@ -399,11 +396,9 @@ class DeepSoundBaseRNN:
                  input_size: int = 1800,
                  set_sample_weights: bool = True,
                  feature_scaling: bool = True,
-                 output_size: int = 4,  # 输出维度为4（0-3）
-                 optimizer_kwargs: dict = None,
-                 loss=None):  # 新增loss参数
+                 output_size: int = 4):  # 新增output_size参数
         self.classes_: Optional[List[int]] = None
-        self.padding_class: int = 4  # 保留填充类别为4（不参与预测）
+        self.padding_class: Optional[int] = None  # 填充类别标记
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
         self.input_size = input_size
         self.original_lengths: List[int] = []     # 存储训练样本原始长度
@@ -421,19 +416,18 @@ class DeepSoundBaseRNN:
         self.nan_detector = NaNDetector(verbose=True)
         self.strategy: Optional[tf.distribute.Strategy] = None
         self.resource_logger = ResourceLogger()
-        self.optimizer_kwargs = optimizer_kwargs or {}  # 优化器参数
-        self.loss = loss  # 保存损失函数
         os.makedirs(self.model_save_path, exist_ok=True)
 
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
-        """构建模型结构，增强稳定性"""
+        """构建模型结构，优化维度转换和正则化（减少显存占用）"""
+        # 打印模型输出维度
         self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={max_seq_len}")
         
-        # 减少CNN卷积核数量，降低特征维度
+        # 核心修改1：减少CNN卷积核数量，降低特征维度
         layers_config = [
-            (16, 18, 3, activations.relu),
-            (16, 9, 1, activations.relu),
-            (32, 3, 1, activations.relu)
+            (16, 18, 3, activations.relu),  # 原32 -> 16
+            (16, 9, 1, activations.relu),   # 原32 -> 16
+            (32, 3, 1, activations.relu)    # 原64 -> 32
         ]
 
         # CNN子网络 - 用于特征提取
@@ -477,34 +471,26 @@ class DeepSoundBaseRNN:
         cnn.add(layers.Flatten(name='flatten'))
         cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))
 
-        # 减少FFN维度，降低参数数量
+        # 核心修改2：减少FFN维度，降低参数数量
         ffn = Sequential(name='ffn_subnetwork')
-        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))
+        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))  # 原256 -> 128
         ffn.add(layers.BatchNormalization(name='ffn_bn_1'))
         ffn.add(layers.Activation(activations.relu, name='ffn_act_1'))
         ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_1'))
         
-        ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))
+        ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))   # 原128 -> 64
         ffn.add(layers.BatchNormalization(name='ffn_bn_2'))
         ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
         ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
         
-        # 修改输出层初始化方式：使用glorot_uniform
-        ffn.add(layers.Dense(
-            self.output_size, 
-            activation=activations.softmax, 
-            kernel_initializer='glorot_uniform',  # 替换原HeUniform，更适合输出层
-            name='ffn_output'
-        ))
+        ffn.add(layers.Dense(self.output_size, activation=activations.softmax, name='ffn_output'))
 
-        # 模型主结构（GRU前后均添加BatchNormalization）
+        # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
         model = Sequential([
             layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
-            layers.Masking(mask_value=-1.0, name='masking_layer'),  # 掩码层忽略填充特征
             layers.TimeDistributed(cnn, name='time_distributed_cnn'),
-            layers.BatchNormalization(name='pre_gru_bn'),  # GRU前添加批归一化，稳定输入分布
             layers.Bidirectional(
-                layers.GRU(64,
+                layers.GRU(64,  # 原128 -> 64
                            activation="tanh", 
                            return_sequences=True, 
                            dropout=0.3,
@@ -512,64 +498,22 @@ class DeepSoundBaseRNN:
                            kernel_initializer=HeUniform()),
                 name='bidirectional_gru'
             ),
-            layers.BatchNormalization(name='post_gru_bn'),  # 新增：GRU输出后添加批归一化
-            # 新增：检查GRU输出是否有NaN
-            layers.Lambda(lambda x: tf.debugging.check_numerics(x, "GRU output contains NaN")),
             layers.TimeDistributed(ffn, name='time_distributed_ffn')
         ])
 
-        # 增强版掩码损失函数，使用纯TensorFlow操作（修复核心问题）
-        def masked_loss(y_true, y_pred):
-            # 1. 创建掩码：填充标签4的位置为0，有效标签（0~3）为1
-            mask = tf.cast(y_true != self.padding_class, tf.float32)  # self.padding_class=4
-            
-            # 2. 提取有效标签（过滤掉填充标签4）
-            # 将填充标签位置替换为一个不影响范围计算的无效值（如-1，因有效标签≥0）
-            y_true_valid = tf.where(mask == 1, y_true, tf.constant(-1, dtype=y_true.dtype))
-            
-            # 3. 仅基于有效标签计算最大/最小值
-            y_true_min = tf.reduce_min(y_true_valid)
-            y_true_max = tf.reduce_max(y_true_valid)
-            
-            # 4. 范围检查：有效标签必须在[0, output_size)内（即0~3）
-            # 注意：此时y_true_max只会是0~3中的一个，因为填充标签已被替换为-1
-            with tf.control_dependencies([
-                tf.debugging.assert_greater_equal(y_true_min, 0, 
-                    message=f"有效标签出现负值！最小有效标签: {y_true_min}"),
-                tf.debugging.assert_less(y_true_max, self.output_size,
-                    message=f"有效标签超出范围！最大有效标签: {y_true_max}, 输出维度: {self.output_size}")
-            ]):
-                # 5. 正常计算损失（填充标签4已被掩码屏蔽，不参与损失）
-                y_pred = tf.debugging.check_numerics(y_pred, "模型输出包含NaN或Inf")
-                loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
-                loss = tf.debugging.check_numerics(loss, "Loss contains NaN or Inf")
-                
-                # 避免除零（当全是填充标签时）
-                total_mask = tf.reduce_sum(mask) + 1e-8
-                return tf.reduce_sum(loss * mask) / total_mask
-
-        # 优化器参数调整：降低学习率 + 梯度裁剪
-        # 设置默认优化器参数
-        optimizer_defaults = {
-            'learning_rate': 1e-5,  # 降低初始学习率
-            'clipvalue': 1.0  # 梯度裁剪，限制最大梯度值
-        }
-        # 合并用户传入的参数（用户参数优先级更高）
-        optimizer_kwargs = {** optimizer_defaults, **self.optimizer_kwargs}
-        optimizer = Adam(** optimizer_kwargs)
-
-        # 如果未传入loss，则使用默认的掩码损失
-        loss_function = self.loss if self.loss is not None else masked_loss
-
         model.compile(
-            optimizer=optimizer,
-            loss=loss_function,  # 使用传入的或默认的掩码损失
+            optimizer=Adam(
+                learning_rate=1e-4,
+                clipnorm=1.0,
+                clipvalue=0.5
+            ),
+            loss='sparse_categorical_crossentropy',
             weighted_metrics=['accuracy']
         )
 
         return model
 
-    def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray], callbacks=None) -> None:
+    def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray]) -> None:
         """训练模型"""
         self.nan_detector = NaNDetector(verbose=True)
         training_start_time = time.time()
@@ -679,8 +623,11 @@ class DeepSoundBaseRNN:
 
             # 处理标签和填充类别
             self.classes_ = list(set(np.concatenate(y))) if y and isinstance(y[0], (list, np.ndarray)) else []
-            self.padding_class = 4  # 显式固定填充类别为4
-            self.resource_logger.log(f"检测到的类别: {self.classes_}, 填充类别编号: {self.padding_class}")
+            self.padding_class = max(self.classes_) + 1 if self.classes_ else 0
+            
+            # 打印填充类别信息
+            self.resource_logger.log(f"训练标签中的类别: {self.classes_}")
+            self.resource_logger.log(f"填充类别编号（padding_class）: {self.padding_class}")
             
             # 填充标签（与X同步在末尾填充）
             y_padded = keras.preprocessing.sequence.pad_sequences(
@@ -705,19 +652,16 @@ class DeepSoundBaseRNN:
             else:
                 self.resource_logger.log("警告：所有值都是填充值，可能数据异常")
 
-            # 特征标准化（增强稳定性：添加截断）
+            # 特征标准化
             if self.feature_scaling and np.any(non_pad_mask):
                 mean = np.mean(X[non_pad_mask])
                 std = np.std(X[non_pad_mask])
-                # 标准化并截断到[-3, 3]标准差范围（减少极端值影响）
-                X_scaled = (X[non_pad_mask] - mean) / (std + 1e-8)
-                X_scaled = np.clip(X_scaled, -3.0, 3.0)
-                X[non_pad_mask] = X_scaled
+                X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 self.resource_logger.log(f"标准化后X统计: min={np.min(X):.4f}, max={np.max(X):.4f}")
                 self.nan_detector.check_nan(X, "标准化后的X")
 
-            # 确定输出维度（固定为4）
-            output_size = 4
+            # 确定输出维度（使用初始化时传入的output_size）
+            output_size = self.output_size
             
             # 分布式训练设置
             self.strategy = tf.distribute.MirroredStrategy()
@@ -746,41 +690,38 @@ class DeepSoundBaseRNN:
             monitor_acc = 'val_accuracy' if use_validation else 'accuracy'
             self.resource_logger.log(f"使用验证集: {use_validation}, 验证比例: {validation_split}")
 
-            # 回调函数（如果外部传入则使用外部的，否则使用内部默认）
-            if callbacks is None:
-                model_callbacks = [
-                    EarlyStopping(patience=50, restore_best_weights=True, monitor=monitor_loss),
-                    ModelCheckpoint(
-                        filepath=os.path.join(self.model_save_path, "best_model.h5"),
-                        monitor=monitor_acc,
-                        save_best_only=True,
-                        verbose=1
-                    ),
-                    LayerOutputMonitor(
-                        model=self.model,
-                        layer_names=['time_distributed_cnn', 'bidirectional_gru', 'time_distributed_ffn'],
-                        sample_batch=monitor_x,
-                        resource_logger=self.resource_logger
-                    ),
-                    ReduceLROnPlateau(
-                        monitor=monitor_loss, factor=0.5, patience=15, min_lr=1e-8, verbose=1
-                    ),
-                    GradientMonitor(
-                        model=self.model,
-                        sample_batch=monitor_batch,
-                        strategy=self.strategy,
-                        resource_logger=self.resource_logger
-                    ),
-                    GPUUsageMonitor(interval=10, resource_logger=self.resource_logger)
-                ]
-            else:
-                model_callbacks = callbacks
+            # 回调函数
+            model_callbacks = [
+                EarlyStopping(patience=50, restore_best_weights=True, monitor=monitor_loss),
+                ModelCheckpoint(
+                    filepath=os.path.join(self.model_save_path, "best_model.h5"),
+                    monitor=monitor_acc,
+                    save_best_only=True,
+                    verbose=1
+                ),
+                LayerOutputMonitor(
+                    model=self.model,
+                    layer_names=['time_distributed_cnn', 'bidirectional_gru', 'time_distributed_ffn'],
+                    sample_batch=monitor_x,
+                    resource_logger=self.resource_logger
+                ),
+                ReduceLROnPlateau(
+                    monitor=monitor_loss, factor=0.5, patience=15, min_lr=1e-8, verbose=1
+                ),
+                GradientMonitor(
+                    model=self.model,
+                    sample_batch=monitor_batch,
+                    strategy=self.strategy,
+                    resource_logger=self.resource_logger
+                ),
+                GPUUsageMonitor(interval=10, resource_logger=self.resource_logger)
+            ]
 
             # 样本权重（填充部分权重为0）
             sample_weights: Optional[np.ndarray] = None
             if self.set_sample_weights and y.size > 0:
                 sample_weights = self._get_samples_weights(y)
-                sample_weights = np.clip(sample_weights, 0.0, 10.0)  # 限制权重范围，避免梯度异常
+                sample_weights = np.clip(sample_weights, 0.0, 10.0)
                 self.resource_logger.log(f"样本权重范围: [{np.min(sample_weights):.4f}, {np.max(sample_weights):.4f}]")
                 self.nan_detector.check_nan(sample_weights, "样本权重")
 
@@ -826,8 +767,13 @@ class DeepSoundBaseRNN:
         finally:
             self.resource_logger.save_log()
 
-    def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = True) -> Union[List[np.ndarray], np.ndarray]:
-        """模型预测，返回裁剪填充后的真实音频结果"""
+    def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = False) -> Union[List[np.ndarray], np.ndarray]:
+        """模型预测，返回裁剪填充后的真实音频结果
+        Args:
+            X: 输入数据
+            aggregate: 是否聚合序列结果（每个样本返回一个标签），True时返回一维数组，False时返回原始序列
+                       默认值改为False，直接返回窗口级预测
+        """
         try:
             if self.max_seq_len is None:
                 raise RuntimeError("请先调用fit方法训练模型")
@@ -911,15 +857,23 @@ class DeepSoundBaseRNN:
                 X[~non_pad_mask] = mean_val
                 mean = np.mean(X[non_pad_mask])
                 std = np.std(X[non_pad_mask])
-                X_scaled = (X[non_pad_mask] - mean) / (std + 1e-8)
-                X_scaled = np.clip(X_scaled, -3.0, 3.0)  # 保持与训练时一致的截断
-                X[non_pad_mask] = X_scaled
+                X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 pred_detector.check_nan(X, "预测：标准化后")
             
-            # 模型预测
+            # 模型预测（先获取概率再求标签）
             self.resource_logger.log(f"预测输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
-            y_pred = self.model.predict(X, verbose=0).argmax(axis=-1)
+            y_pred_proba = self.model.predict(X, verbose=0)  # 概率形状：(样本数, 窗口数, 类别数)
+            y_pred = y_pred_proba.argmax(axis=-1)  # 取概率最大的标签
+
+            # 打印预测概率与标签（前3个样本的前5个窗口）
+            for i in range(min(3, len(y_pred))):
+                self.resource_logger.log(f"样本{i}预测详情：")
+                for j in range(min(5, y_pred.shape[1])):
+                    probs = y_pred_proba[i, j]  # 该窗口的所有类别概率
+                    pred_label = y_pred[i, j]   # 该窗口的预测标签
+                    self.resource_logger.log(f"  窗口{j} - 概率: {[round(p, 3) for p in probs]} → 预测标签: {pred_label}")
+            
             self.resource_logger.log(f"模型原始预测输出形状: {y_pred.shape}")
             
             # 根据原始长度裁剪，去除填充部分
@@ -927,8 +881,12 @@ class DeepSoundBaseRNN:
             for i in range(len(y_pred)):
                 real_len = pred_original_lengths[i]  # 使用预测样本的原始长度
                 trimmed = y_pred[i, :real_len]  # 仅保留真实音频部分
+                
+                # 打印裁剪前后的标签对比
+                self.resource_logger.log(f"样本{i} - 裁剪前标签（最后5个窗口，可能含填充）: {y_pred[i, -5:]}")
+                self.resource_logger.log(f"样本{i} - 裁剪后标签（实际窗口，长度{real_len}）: {trimmed[-5:] if len(trimmed)>=5 else trimmed}")
+                
                 trimmed_preds.append(trimmed)
-                self.resource_logger.log(f"样本{i}裁剪后形状: {trimmed.shape}, 原始长度: {real_len}")
             
             # 聚合序列结果（每个样本返回一个标签）
             if aggregate:
@@ -969,8 +927,12 @@ class DeepSoundBaseRNN:
                 self.resource_logger.log(f"预测完成，聚合后结果形状: {result.shape} (一维数组)")
                 return result
             else:
-                self.resource_logger.log(f"预测完成，裁剪后结果数量: {len(trimmed_preds)}，均为原始音频长度")
-                return trimmed_preds if len(trimmed_preds) > 1 else trimmed_preds[0]
+                # 直接返回所有窗口的预测结果，展平为一维数组以匹配标签形状
+                flat_predictions = np.concatenate(trimmed_preds) if trimmed_preds else np.array([])
+                self.resource_logger.log(f"预测完成，窗口级结果总长度: {len(flat_predictions)}")
+                self.resource_logger.log(f"窗口级结果形状: {flat_predictions.shape}")
+                return flat_predictions
+
         except Exception as e:
             self.resource_logger.log(f"预测过程出错: {str(e)}")
             traceback.print_exc()
@@ -1056,9 +1018,7 @@ class DeepSoundBaseRNN:
                 X[~non_pad_mask] = mean_val
                 mean = np.mean(X[non_pad_mask])
                 std = np.std(X[non_pad_mask])
-                X_scaled = (X[non_pad_mask] - mean) / (std + 1e-8)
-                X_scaled = np.clip(X_scaled, -3.0, 3.0)  # 保持截断
-                X[non_pad_mask] = X_scaled
+                X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 pred_detector.check_nan(X, "预测概率：标准化后")
             
             # 预测概率
@@ -1120,22 +1080,18 @@ class DeepSound(DeepSoundBaseRNN):
     """DeepSound模型，继承自RNN基础类"""
     def __init__(self,
                  batch_size: int = 5,
-                 input_size: int = 1800,
-                 output_size: int = 4,
+                 input_size: int = 4000,
+                 output_size: int = 3,  # 接收动态输出维度
                  n_epochs: int = 1400,
                  training_reshape: bool = False,
                  set_sample_weights: bool = True,
-                 feature_scaling: bool = True,
-                 optimizer_kwargs: dict = None,
-                 loss=None):  # 新增loss参数
+                 feature_scaling: bool = True):
         super().__init__(
             batch_size=batch_size,
             n_epochs=n_epochs,
             input_size=input_size,
             set_sample_weights=set_sample_weights,
             feature_scaling=feature_scaling,
-            output_size=output_size,
-            optimizer_kwargs=optimizer_kwargs,
-            loss=loss  # 传递loss参数给父类
+            output_size=output_size  # 传递输出维度到父类
         )
         self.training_reshape = training_reshape
