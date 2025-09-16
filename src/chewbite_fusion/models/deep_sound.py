@@ -518,32 +518,32 @@ class DeepSoundBaseRNN:
             layers.TimeDistributed(ffn, name='time_distributed_ffn')
         ])
 
-        # 增强版掩码损失函数，添加数值检查
+        # 增强版掩码损失函数，使用纯TensorFlow操作（修复核心问题）
         def masked_loss(y_true, y_pred):
-            # 检查标签是否有超出范围的值
-            y_true_np = tf.keras.backend.eval(y_true)
-            if np.any(y_true_np < 0) or np.any(y_true_np >= self.output_size):
-                invalid_mask = (y_true_np < 0) | (y_true_np >= self.output_size)
-                logger.error(f"发现无效标签值！标签范围: [{np.min(y_true_np)}, {np.max(y_true_np)}]")
-                logger.error(f"无效标签示例: {y_true_np[invalid_mask][:5]}")
+            # 检查标签是否有超出范围的值（使用TensorFlow操作）
+            y_true_min = tf.reduce_min(y_true)
+            y_true_max = tf.reduce_max(y_true)
             
-            # 检查模型输出是否有NaN/无穷大
-            y_pred_np = tf.keras.backend.eval(y_pred)
-            if np.isnan(y_pred_np).any():
-                logger.error(f"模型输出存在NaN值！NaN数量: {np.isnan(y_pred_np).sum()}")
-            if np.isinf(y_pred_np).any():
-                logger.error(f"模型输出存在无穷大值！无穷大数量: {np.isinf(y_pred_np).sum()}")
-            
-            # 原始掩码逻辑
-            mask = tf.cast(y_true != self.padding_class, tf.float32)
-            loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
-            
-            # 检查损失是否包含NaN
-            loss = tf.debugging.check_numerics(loss, "Loss contains NaN or Inf")
-            
-            # 处理可能的除零情况，添加极小值防止除以0
-            total_mask = tf.reduce_sum(mask) + 1e-8
-            return tf.reduce_sum(loss * mask) / total_mask
+            # 使用tf.debugging.assert进行范围检查，只在调试模式触发错误
+            with tf.control_dependencies([
+                tf.debugging.assert_greater_equal(y_true_min, 0, 
+                    message=f"发现负标签值！最小标签值: {y_true_min}"),
+                tf.debugging.assert_less(y_true_max, self.output_size,
+                    message=f"发现超出范围的标签值！最大标签值: {y_true_max}, 输出维度: {self.output_size}")
+            ]):
+                # 检查模型输出是否有NaN/无穷大（使用TensorFlow内置函数）
+                y_pred = tf.debugging.check_numerics(y_pred, "模型输出包含NaN或Inf")
+                
+                # 原始掩码逻辑
+                mask = tf.cast(y_true != self.padding_class, tf.float32)
+                loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
+                
+                # 检查损失是否包含NaN
+                loss = tf.debugging.check_numerics(loss, "Loss contains NaN or Inf")
+                
+                # 处理可能的除零情况，添加极小值防止除以0
+                total_mask = tf.reduce_sum(mask) + 1e-8
+                return tf.reduce_sum(loss * mask) / total_mask
 
         # 优化器参数调整：降低学习率 + 梯度裁剪
         # 设置默认优化器参数
