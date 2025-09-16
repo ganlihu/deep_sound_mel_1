@@ -58,6 +58,7 @@ class Experiment:
         self.train_validation_segments = []
         self.quantization = quantization
         self.data_augmentation = data_augmentation
+        self.callbacks = []  # 新增：存储回调函数
 
         self.path = os.path.join(settings.experiments_path, name, self.timestamp)
         os.makedirs(self.path, exist_ok=True)
@@ -77,6 +78,10 @@ class Experiment:
         logger.setLevel(logging.INFO)
 
         set_random_init()
+
+    # 新增：添加回调函数的方法
+    def add_callbacks(self, callbacks):
+        self.callbacks.extend(callbacks)
 
     def run(self):
         '''运行实验并保存相关信息'''
@@ -301,7 +306,8 @@ class Experiment:
             logger.info(f"X_train 长度（样本数）：{len(X_train)}")
             logger.info(f"第一个样本形状：{len(X_train[0]) if X_train else None}")
 
-            funnel.fit(X_train, y_train_enc)
+            # 传入回调函数进行训练
+            funnel.fit(X_train, y_train_enc, callbacks=self.callbacks)
 
             # 量化处理
             if self.quantization:
@@ -634,8 +640,8 @@ class Funnel:
         self.model = model_instance
         self.use_raw_data = use_raw_data
 
-    def fit(self, X, y):
-        '''拟合特征并训练模型'''
+    def fit(self, X, y, callbacks=None):
+        '''拟合特征并训练模型（新增callbacks参数）'''
         X_features = []
         for feature in self.features:
             logger.info(f'Processing the feature {feature.feature.__class__.__name__}.')
@@ -645,7 +651,8 @@ class Funnel:
             X_features = np.concatenate(X_features, axis=1)
 
         logger.info('Training model ...')
-        self.model.fit(X_features, y)
+        # 传递回调函数给模型训练
+        self.model.fit(X_features, y, callbacks=callbacks or [])
 
     def predict(self, X):
         '''特征转换并预测'''
