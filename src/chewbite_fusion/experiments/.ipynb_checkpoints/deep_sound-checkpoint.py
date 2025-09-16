@@ -34,7 +34,10 @@ def get_model_instance(variable_params):
 
 @experiment()
 def deep_sound():
-    tf.debugging.enable_check_numerics()
+    """ Experiment with Deep Sound architecture. """
+    # 注释或删除这行：tf.debugging.enable_check_numerics() （与XLA GPU不兼容）
+    
+    # 设置全局数值精度（避免浮点溢出）
     tf.keras.backend.set_floatx('float32')
     
     window_width = 0.3

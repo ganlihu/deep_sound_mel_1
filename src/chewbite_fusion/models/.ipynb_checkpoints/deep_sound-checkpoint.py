@@ -483,7 +483,7 @@ class DeepSoundBaseRNN:
         ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
         ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
         
-        ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
+        ffn.add(layers.Dense(self.output_size, activation=activations.softmax, name='ffn_output'))
 
         # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
         model = Sequential([
