@@ -29,9 +29,58 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import activations
 from tensorflow.keras.initializers import HeUniform
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, Callback
 from chewbite_fusion.data.utils import NaNDetector
 import traceback
+
+
+# 修复：将check_input_data定义为模块级函数，确保全局可访问
+def check_input_data(data, resource_logger, batch_num):
+    """检查输入数据中是否有极端值或NaN"""
+    min_val = tf.reduce_min(data)
+    max_val = tf.reduce_max(data)
+    mean_val = tf.reduce_mean(data)
+    std_val = tf.math.reduce_std(data)
+    has_nan = tf.reduce_any(tf.math.is_nan(data))
+    has_inf = tf.reduce_any(tf.math.is_inf(data))
+
+    # 安全处理批次号（增强版：确保转换为Python原生类型）
+    batch_num_val = batch_num
+    if isinstance(batch_num_val, tf.Tensor):
+        # 尝试获取静态值
+        static_val = tf.get_static_value(batch_num_val)
+        if static_val is not None:
+            batch_num_val = static_val
+        else:
+            # 尝试在Eager模式下转换
+            try:
+                if tf.executing_eagerly():
+                    batch_num_val = batch_num_val.numpy()
+                else:
+                    batch_num_val = f"Tensor({batch_num_val.dtype})"
+            except:
+                batch_num_val = "不可转换的Tensor"
+    
+    # 处理可能的numpy类型
+    if isinstance(batch_num_val, np.ndarray):
+        batch_num_val = batch_num_val.item()  # 转换为Python标量
+
+    # 用安全转换后的值进行日志输出
+    resource_logger.log(
+        f"输入数据检查 - 批次 {batch_num_val}:\n"
+        f"  数据范围: [{min_val:.6f}, {max_val:.6f}]\n"
+        f"  均值: {mean_val:.6f}, 标准差: {std_val:.6f}\n"
+        f"  含NaN: {has_nan.numpy()}, 含Inf: {has_inf.numpy()}"
+    )
+    
+    # 如果发现异常值，记录更多信息
+    if has_nan.numpy() or has_inf.numpy():
+        nan_indices = tf.where(tf.math.is_nan(data))
+        inf_indices = tf.where(tf.math.is_inf(data))
+        resource_logger.log(f"  NaN位置: {nan_indices.numpy()[:5]} (最多显示5个)\n"
+                          f"  Inf位置: {inf_indices.numpy()[:5]} (最多显示5个)")
+    
+    return tf.debugging.check_numerics(data, "输入数据包含NaN/无穷大")
 
 
 class ResourceLogger:
@@ -381,11 +430,114 @@ class GradientMonitor(keras.callbacks.Callback):
                 if has_inf:
                     self.resource_logger.log(f"Epoch {epoch} 梯度包含Inf!")
                 if grad_norms:
-                    self.resource_logger.log(f"Epoch {epoch} 梯度范数最大值: {np.max(grad_norms):.4f}")
+                    # 增强梯度范围监控
+                    self.resource_logger.log(f"Epoch {epoch} 梯度范数统计: "
+                                           f"最大值={np.max(grad_norms):.4f}, "
+                                           f"最小值={np.min(grad_norms):.4f}, "
+                                           f"平均值={np.mean(grad_norms):.4f}")
                 
         except Exception as e:
             self.resource_logger.log(f"梯度监控出错: {str(e)}")
             traceback.print_exc()
+
+
+# 添加每批次训练的输出检查回调
+class BatchOutputMonitor(keras.callbacks.Callback):
+    def __init__(self, resource_logger):
+        super().__init__()
+        self.resource_logger = resource_logger
+        
+    def on_train_batch_end(self, batch, logs=None):
+        if batch % 10 == 0:  # 每10个批次检查一次
+            self.resource_logger.log(f"\n===== 批次 {batch} 训练状态 =====")
+            self.resource_logger.log(f"损失值: {logs.get('loss', '未知')}")
+            self.resource_logger.log(f"准确率: {logs.get('accuracy', '未知')}")
+            self.resource_logger.log("===========================")
+
+
+# 新增：监控conv1d_5权重的回调
+class Conv1DWeightMonitor(Callback):
+    def __init__(self, resource_logger):
+        super().__init__()
+        self.resource_logger = resource_logger
+        
+    def on_batch_end(self, batch, logs=None):
+        if batch % 5 == 0:  # 每5个批次检查一次
+            try:
+                conv1d_5 = self.model.get_layer('conv1d_5')
+                kernel = conv1d_5.kernel
+                bias = conv1d_5.bias
+                
+                # 记录权重范围
+                kernel_min = tf.reduce_min(kernel)
+                kernel_max = tf.reduce_max(kernel)
+                bias_min = tf.reduce_min(bias)
+                bias_max = tf.reduce_max(bias)
+                
+                # 检查是否有NaN
+                has_nan_kernel = tf.reduce_any(tf.math.is_nan(kernel))
+                has_nan_bias = tf.reduce_any(tf.math.is_nan(bias))
+                
+                self.resource_logger.log(
+                    f"conv1d_5 权重监控 - 批次 {batch}:\n"
+                    f"  权重范围: [{kernel_min:.6f}, {kernel_max:.6f}]\n"
+                    f"  偏置范围: [{bias_min:.6f}, {bias_max:.6f}]\n"
+                    f"  权重含NaN: {has_nan_kernel.numpy()}, 偏置含NaN: {has_nan_bias.numpy()}"
+                )
+            except Exception as e:
+                self.resource_logger.log(f"conv1d_5权重监控出错: {str(e)}")
+
+
+# 新增：监控conv1d_5梯度的回调
+class Conv1DGradientMonitor(Callback):
+    def __init__(self, resource_logger, model, strategy):
+        super().__init__()
+        self.resource_logger = resource_logger
+        self.model = model
+        self.strategy = strategy
+        self.loss_fn = self.model.loss
+        if isinstance(self.loss_fn, str):
+            self.loss_fn = keras.losses.get(self.loss_fn)
+            
+    def on_batch_end(self, batch, logs=None):
+        if batch % 10 == 0:  # 每10个批次检查一次
+            try:
+                # 获取最后一个批次的数据
+                batch_data = self.model._get_last_batch()
+                if batch_data is None:
+                    return
+                    
+                # 处理可能包含样本权重的批次数据
+                if len(batch_data) == 3:
+                    x_batch, y_batch, sample_weight = batch_data
+                else:
+                    x_batch, y_batch = batch_data
+                    sample_weight = None
+                
+                # 计算梯度
+                with tf.GradientTape() as tape:
+                    y_pred = self.model(x_batch, training=True)
+                    loss = self.loss_fn(y_batch, y_pred, sample_weight=sample_weight)
+                
+                # 获取conv1d_5的梯度
+                conv1d_5 = self.model.get_layer('conv1d_5')
+                grads = tape.gradient(loss, conv1d_5.trainable_weights)
+                
+                # 分析梯度
+                for grad, var in zip(grads, conv1d_5.trainable_weights):
+                    if grad is not None:
+                        grad_min = tf.reduce_min(grad)
+                        grad_max = tf.reduce_max(grad)
+                        has_nan = tf.reduce_any(tf.math.is_nan(grad))
+                        has_inf = tf.reduce_any(tf.math.is_inf(grad))
+                        
+                        self.resource_logger.log(
+                            f"conv1d_5 梯度监控 - 批次 {batch} - {var.name}:\n"
+                            f"  梯度范围: [{grad_min:.6f}, {grad_max:.6f}]\n"
+                            f"  含NaN: {has_nan.numpy()}, 含Inf: {has_inf.numpy()}"
+                        )
+            except Exception as e:
+                self.resource_logger.log(f"conv1d_5梯度监控出错: {str(e)}")
 
 
 class DeepSoundBaseRNN:
@@ -415,6 +567,7 @@ class DeepSoundBaseRNN:
         self.strategy: Optional[tf.distribute.Strategy] = None
         self.resource_logger = ResourceLogger()
         os.makedirs(self.model_save_path, exist_ok=True)
+        self.last_batch = None  # 用于存储最后一个批次的数据，供梯度监控使用
 
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
         """构建模型结构，优化维度转换和正则化（减少显存占用）"""
@@ -441,10 +594,30 @@ class DeepSoundBaseRNN:
                 kernel_initializer=HeUniform(),
                 name=f'conv1d_{ix_l*2 + 1}'
             ))
+            # 添加卷积后监控
+            cnn.add(layers.Lambda(
+                lambda x: [
+                    tf.print(f"conv1d_{ix_l*2 + 1}输出范围: ", tf.reduce_min(x), tf.reduce_max(x)),
+                    tf.debugging.check_numerics(x, f"conv1d_{ix_l*2 + 1}包含NaN/无穷大"),
+                    x
+                ][2],
+                name=f'conv1d_{ix_l*2 + 1}_monitor'
+            ))
             cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 1}'))
+            # 添加BN后监控
+            cnn.add(layers.Lambda(
+                lambda x: [
+                    tf.print(f"bn_{ix_l*2 + 1}输出范围: ", tf.reduce_min(x), tf.reduce_max(x)),
+                    tf.debugging.check_numerics(x, f"bn_{ix_l*2 + 1}包含NaN/无穷大"),
+                    x
+                ][2],
+                name=f'bn_{ix_l*2 + 1}_monitor'
+            ))
             cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 1}'))
 
-            # 第二个卷积块
+            # 第二个卷积块（相同方式添加监控）
+            # 重点监控conv1d_5层（ix_l=2时）
+            layer_name = f'conv1d_{ix_l*2 + 2}'
             cnn.add(layers.Conv1D(
                 layer[0],
                 kernel_size=layer[1],
@@ -453,9 +626,63 @@ class DeepSoundBaseRNN:
                 padding=self.padding,
                 data_format=self.data_format,
                 kernel_initializer=HeUniform(),
-                name=f'conv1d_{ix_l*2 + 2}'
+                name=layer_name
             ))
+            
+            # 对conv1d_5层添加额外监控
+            if layer_name == 'conv1d_5':
+                # 输入监控
+                cnn.add(layers.Lambda(
+                    lambda x: [
+                        tf.print("conv1d_5输入范围:", tf.reduce_min(x), tf.reduce_max(x),
+                                "是否含NaN:", tf.reduce_any(tf.math.is_nan(x))),
+                        tf.debugging.check_numerics(x, "conv1d_5输入包含NaN/无穷大"),
+                        x
+                    ][2],
+                    name='conv1d_5_input_monitor'
+                ))
+                
+                # 重新添加conv1d_5层（因为上面的Lambda层改变了顺序）
+                cnn.add(layers.Conv1D(
+                    layer[0],
+                    kernel_size=layer[1],
+                    strides=layer[2],
+                    activation=None,
+                    padding=self.padding,
+                    data_format=self.data_format,
+                    kernel_initializer=HeUniform(),
+                    name='conv1d_5'
+                ))
+                
+                # 输出监控
+                cnn.add(layers.Lambda(
+                    lambda x: [
+                        tf.print("conv1d_5输出范围:", tf.reduce_min(x), tf.reduce_max(x),
+                                "是否含NaN:", tf.reduce_any(tf.math.is_nan(x))),
+                        tf.debugging.check_numerics(x, "conv1d_5输出包含NaN/无穷大"),
+                        x
+                    ][2],
+                    name='conv1d_5_output_monitor'
+                ))
+            else:
+                cnn.add(layers.Lambda(
+                    lambda x, ln=layer_name: [
+                        tf.print(f"{ln}输出范围: ", tf.reduce_min(x), tf.reduce_max(x)),
+                        tf.debugging.check_numerics(x, f"{ln}包含NaN/无穷大"),
+                        x
+                    ][2],
+                    name=f'{layer_name}_monitor'
+                ))
+            
             cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 2}'))
+            cnn.add(layers.Lambda(
+                lambda x: [
+                    tf.print(f"bn_{ix_l*2 + 2}输出范围: ", tf.reduce_min(x), tf.reduce_max(x)),
+                    tf.debugging.check_numerics(x, f"bn_{ix_l*2 + 2}包含NaN/无穷大"),
+                    x
+                ][2],
+                name=f'bn_{ix_l*2 + 2}_monitor'
+            ))
             cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 2}'))
 
             # 除最后一层外添加Dropout
@@ -547,7 +774,59 @@ class DeepSoundBaseRNN:
             )
         ])
 
-        model.compile(
+        # 新增：自定义训练步骤以监控批次数据，支持样本权重
+        class CustomModel(keras.Model):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._train_counter = tf.Variable(0, trainable=False, dtype=tf.int64)  # 初始化批次计数器
+                self._last_batch = None  # 存储最后一个批次数据
+                
+            def train_step(self, data):
+                # 处理包含样本权重的三元组或普通二元组
+                if len(data) == 3:
+                    x, y, sample_weight = data
+                else:
+                    x, y = data
+                    sample_weight = None
+                
+                # 保存批次数据供后续梯度监控（包含样本权重）
+                self._last_batch = (x, y, sample_weight) if sample_weight is not None else (x, y)
+                
+                # 获取批次号（使用numpy值避免Tensor格式化问题）
+                train_counter = self._train_counter.numpy() if tf.executing_eagerly() else "graph_mode"
+                x = check_input_data(x, self.resource_logger, train_counter)
+                
+                # 前向传播
+                with tf.GradientTape() as tape:
+                    y_pred = self(x, training=True)
+                    # 计算损失时传入样本权重
+                    loss = self.compiled_loss(
+                        y, y_pred,
+                        sample_weight=sample_weight,
+                        regularization_losses=self.losses
+                    )
+                
+                # 计算梯度并更新权重
+                gradients = tape.gradient(loss, self.trainable_variables)
+                self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+                
+                # 更新指标（传入样本权重）
+                self.compiled_metrics.update_state(y, y_pred, sample_weight=sample_weight)
+                
+                # 批次计数器递增
+                self._train_counter.assign_add(1)
+                
+                # 返回指标结果
+                return {m.name: m.result() for m in self.metrics}
+                
+            def _get_last_batch(self):
+                return self._last_batch
+
+        # 转换为自定义模型
+        custom_model = CustomModel(model.input, model.output)
+        custom_model.resource_logger = self.resource_logger
+        
+        custom_model.compile(
             optimizer=Adam(
                 learning_rate=1e-4,
                 clipnorm=1.0,
@@ -557,7 +836,7 @@ class DeepSoundBaseRNN:
             weighted_metrics=['accuracy']
         )
 
-        return model
+        return custom_model
 
     def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray]) -> None:
         """训练模型"""
@@ -733,14 +1012,18 @@ class DeepSoundBaseRNN:
                 std = np.std(X[non_pad_mask])
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 self.resource_logger.log(f"标准化后X统计: min={np.min(X):.4f}, max={np.max(X):.4f}")
+                # 添加更详细的输入数据监控
+                self.resource_logger.log(f"标准化后X极端值: 最小={np.min(X):.6f}, 最大={np.max(X):.6f}, 均值={np.mean(X):.6f}, 标准差={np.std(X):.6f}")
+                self.resource_logger.log(f"标准化后X是否含Inf: {np.isinf(X).any()}, 位置: {np.where(np.isinf(X))}")
                 self.nan_detector.check_nan(X, "标准化后的X")
 
             # 确定输出维度
             output_size = len(self.classes_) + 1 if self.classes_ else 4
             
-            # 分布式训练设置
-            self.strategy = tf.distribute.MirroredStrategy()
-            self.resource_logger.log(f"已检测到 {self.strategy.num_replicas_in_sync} 个GPU，将用于分布式训练")
+            # 分布式训练设置 - 确保在策略作用域内构建模型
+            if self.strategy is None:
+                self.strategy = tf.distribute.MirroredStrategy()
+                self.resource_logger.log(f"已检测到 {self.strategy.num_replicas_in_sync} 个GPU，将用于分布式训练")
             
             with self.strategy.scope():
                 self.model = self._build_model(max_seq_len=self.max_seq_len, output_size=output_size)
@@ -776,7 +1059,12 @@ class DeepSoundBaseRNN:
                 ),
                 LayerOutputMonitor(
                     model=self.model,
-                    layer_names=['time_distributed_cnn', 'bidirectional_gru', 'time_distributed_ffn'],
+                    layer_names=[
+                        'conv1d_1', 'bn_1', 'conv1d_2', 'bn_2',  # 第一层卷积块
+                        'conv1d_3', 'bn_3', 'conv1d_4', 'bn_4',  # 第二层卷积块
+                        'conv1d_5', 'bn_5', 'conv1d_6', 'bn_6',  # 第三层卷积块
+                        'time_distributed_cnn', 'bidirectional_gru', 'time_distributed_ffn'
+                    ],
                     sample_batch=monitor_x,
                     resource_logger=self.resource_logger
                 ),
@@ -789,8 +1077,20 @@ class DeepSoundBaseRNN:
                     strategy=self.strategy,
                     resource_logger=self.resource_logger
                 ),
-                GPUUsageMonitor(interval=10, resource_logger=self.resource_logger)
+                GPUUsageMonitor(interval=10, resource_logger=self.resource_logger),
+                BatchOutputMonitor(resource_logger=self.resource_logger),  # 添加批次监控回调
+                Conv1DWeightMonitor(resource_logger=self.resource_logger)  # 新增：conv1d_5权重监控
             ]
+            
+            # 只有在单GPU训练时添加梯度监控（分布式训练需要特殊处理）
+            if self.strategy.num_replicas_in_sync == 1:
+                model_callbacks.append(
+                    Conv1DGradientMonitor(
+                        resource_logger=self.resource_logger,
+                        model=self.model,
+                        strategy=self.strategy
+                    )
+                )
 
             # 样本权重（填充部分权重为0）
             sample_weights: Optional[np.ndarray] = None
@@ -1135,7 +1435,7 @@ class DeepSoundBaseRNN:
 class DeepSound(DeepSoundBaseRNN):
     """DeepSound模型，继承自RNN基础类"""
     def __init__(self,
-                 batch_size: int = 5,  # 可结合之前修改的experiments/deep_sound.py进一步减小
+                 batch_size: int = 5,  # 结合实验调整为较小批次
                  input_size: int = 4000,
                  output_size: int = 3,
                  n_epochs: int = 1400,
