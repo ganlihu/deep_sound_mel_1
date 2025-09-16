@@ -26,7 +26,7 @@ def get_model_instance(variable_params, num_classes=4):
     return DeepSound(
         input_size=1800,
         output_size=num_classes,  # 与有效类别数一致（0-3）
-        n_epochs=2,
+        n_epochs=1,
         batch_size=8,
         training_reshape=True,
         set_sample_weights=True,

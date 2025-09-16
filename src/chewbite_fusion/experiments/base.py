@@ -247,6 +247,9 @@ class Experiment:
             all_raw_labels = np.hstack(y_train) if isinstance(y_train[0], (list, np.ndarray)) else y_train
             unique_labels = np.unique(all_raw_labels)
 
+            # 检查原始标签中是否存在无效值
+            logger.info(f"所有原始标签值: {unique_labels}")
+            
             # 新增：训练数据标签数量检查
             logger.info(f"===== 标签数量核心检查 =====")
             logger.info(f"训练数据中所有原始标签（前100个）: {all_raw_labels[:100]}")  # 打印部分标签
