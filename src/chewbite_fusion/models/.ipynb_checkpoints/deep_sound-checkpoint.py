@@ -520,28 +520,31 @@ class DeepSoundBaseRNN:
 
         # 增强版掩码损失函数，使用纯TensorFlow操作（修复核心问题）
         def masked_loss(y_true, y_pred):
-            # 检查标签是否有超出范围的值（使用TensorFlow操作）
-            y_true_min = tf.reduce_min(y_true)
-            y_true_max = tf.reduce_max(y_true)
+            # 1. 创建掩码：填充标签4的位置为0，有效标签（0~3）为1
+            mask = tf.cast(y_true != self.padding_class, tf.float32)  # self.padding_class=4
             
-            # 使用tf.debugging.assert进行范围检查，只在调试模式触发错误
+            # 2. 提取有效标签（过滤掉填充标签4）
+            # 将填充标签位置替换为一个不影响范围计算的无效值（如-1，因有效标签≥0）
+            y_true_valid = tf.where(mask == 1, y_true, tf.constant(-1, dtype=y_true.dtype))
+            
+            # 3. 仅基于有效标签计算最大/最小值
+            y_true_min = tf.reduce_min(y_true_valid)
+            y_true_max = tf.reduce_max(y_true_valid)
+            
+            # 4. 范围检查：有效标签必须在[0, output_size)内（即0~3）
+            # 注意：此时y_true_max只会是0~3中的一个，因为填充标签已被替换为-1
             with tf.control_dependencies([
                 tf.debugging.assert_greater_equal(y_true_min, 0, 
-                    message=f"发现负标签值！最小标签值: {y_true_min}"),
+                    message=f"有效标签出现负值！最小有效标签: {y_true_min}"),
                 tf.debugging.assert_less(y_true_max, self.output_size,
-                    message=f"发现超出范围的标签值！最大标签值: {y_true_max}, 输出维度: {self.output_size}")
+                    message=f"有效标签超出范围！最大有效标签: {y_true_max}, 输出维度: {self.output_size}")
             ]):
-                # 检查模型输出是否有NaN/无穷大（使用TensorFlow内置函数）
+                # 5. 正常计算损失（填充标签4已被掩码屏蔽，不参与损失）
                 y_pred = tf.debugging.check_numerics(y_pred, "模型输出包含NaN或Inf")
-                
-                # 原始掩码逻辑
-                mask = tf.cast(y_true != self.padding_class, tf.float32)
                 loss = keras.losses.sparse_categorical_crossentropy(y_true, y_pred)
-                
-                # 检查损失是否包含NaN
                 loss = tf.debugging.check_numerics(loss, "Loss contains NaN or Inf")
                 
-                # 处理可能的除零情况，添加极小值防止除以0
+                # 避免除零（当全是填充标签时）
                 total_mask = tf.reduce_sum(mask) + 1e-8
                 return tf.reduce_sum(loss * mask) / total_mask
 
