@@ -1,7 +1,7 @@
 import os
 import logging
 import pickle
-import gc
+import gc  # 垃圾回收模块
 from glob import glob
 from datetime import datetime as dt
 import hashlib
@@ -9,11 +9,10 @@ import hashlib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import ParameterGrid
 import sed_eval
 import dcase_util
-import tensorflow as tf
+import tensorflow as tf  # 导入TensorFlow
 
 from chewbite_fusion.data.utils import windows2events
 from chewbite_fusion.experiments import settings
@@ -24,7 +23,7 @@ logger = logging.getLogger('yaer')
 
 
 class Experiment:
-    '''Base class to represent an experiment using audio and movement signals.'''
+    ''' Base class to represent an experiment using audio and movement signals. '''
     def __init__(self,
                  model_factory,
                  features_factory,
@@ -59,30 +58,29 @@ class Experiment:
         self.quantization = quantization
         self.data_augmentation = data_augmentation
 
+        # 创建实验路径
         self.path = os.path.join(settings.experiments_path, name, self.timestamp)
         os.makedirs(self.path, exist_ok=True)
 
         # 配置日志（文件和标准输出）
         logger.handlers = []
         fileHandler = logging.FileHandler(f"{self.path}/experiment.log")
-        consoleHandler = logging.StreamHandler()  # 新增控制台输出
         formatter = logging.Formatter(
             fmt='%(asctime)s %(levelname)-8s %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         fileHandler.setFormatter(formatter)
-        consoleHandler.setFormatter(formatter)
         logger.addHandler(fileHandler)
-        logger.addHandler(consoleHandler)
-        logger.setLevel(logging.INFO)
 
+        # 设置随机种子
         set_random_init()
 
     def run(self):
-        '''运行实验并保存相关信息'''
+        ''' 运行实验并保存相关信息 '''
         self.X = self.X['zavalla2022']
         self.y = self.y['zavalla2022']
 
+        # 验证片段ID解析
         for k in self.X.keys():
             try:
                 seg_id = int(k.split('_')[1])
@@ -90,6 +88,7 @@ class Experiment:
             except:
                 logger.error(f'Failed to parse segment ID from {k}')
 
+        # 折叠划分（基于反刍片段的分层随机抽样）
         folds = {
             '1': [40, 41, 7, 37, 26, 24, 17, 48, 21, 5],
             '2': [33, 52, 23, 4, 15, 36, 49, 18, 28, 50],
@@ -99,6 +98,8 @@ class Experiment:
         }
 
         self.train_validation_segments = [seg for fold in folds.values() for seg in fold]
+
+        # 记录训练验证片段信息
         logger.info('train_validation_segments count: %d', len(self.train_validation_segments))
         logger.info('train_validation_segments: %s', self.train_validation_segments)
 
@@ -113,9 +114,11 @@ class Experiment:
                 else:
                     logger.info('Running folds without grid search.')
 
+                # 生成参数哈希值
                 hash_method_instance.update(str(params_combination).encode())
                 params_combination_hash = hash_method_instance.hexdigest()
 
+                # 执行k折交叉验证
                 params_combination_result = self.execute_kfoldcv(
                     folds=folds,
                     is_grid_search=True,
@@ -124,6 +127,7 @@ class Experiment:
 
                 params_results[params_combination_hash] = (params_combination_result, params_combination)
 
+            # 选择最佳参数组合
             best_params_combination = max(params_results.values(), key=lambda i: i[0])[1]
             logger.info('-' * 25)
             logger.info('>>> All params combination values: %s <<<', str(params_results))
@@ -134,6 +138,7 @@ class Experiment:
             logger.info('>>> Skipping grid search! No params dict provided. <<<')
             best_params_combination = full_grid[0] if full_grid else {}
 
+        # 使用最佳参数执行最终交叉验证
         self.execute_kfoldcv(
             folds=folds,
             is_grid_search=False,
@@ -141,9 +146,8 @@ class Experiment:
         )
 
     def execute_kfoldcv(self, folds, is_grid_search, parameters_combination):
-        '''使用特定参数执行k折交叉验证，新增窗口级评估'''
+        ''' 使用特定参数执行k折交叉验证 '''
         signal_predictions = {}
-        window_metrics = []  # 存储各折的窗口级准确率
 
         for ix_fold, fold in folds.items():
             logger.info('Running fold number %s.', ix_fold)
@@ -153,6 +157,7 @@ class Experiment:
             train_fold_keys = [k for k in self.X.keys() if int(k.split('_')[1]) not in fold]
             train_fold_keys = [k for k in train_fold_keys if int(k.split('_')[1]) in self.train_validation_segments]
 
+            # 记录训练片段信息
             logger.info('Train fold keys count: %d', len(train_fold_keys))
             logger.info('Train fold keys: %s.', str(train_fold_keys))
 
@@ -182,6 +187,7 @@ class Experiment:
             # 数据增强
             if self.data_augmentation:
                 from augly.audio import functional
+                # 计算类别分布
                 all_y = []
                 n_labels = 0
                 for i_file in range(len(X_train)):
@@ -192,10 +198,12 @@ class Experiment:
                 unique, counts = np.unique(all_y, return_counts=True)
                 classes_probs = dict(zip(unique, counts / n_labels))
 
+                # 复制原始数据
                 import copy
                 X_augmented = copy.deepcopy(X_train)
                 y_augmented = copy.deepcopy(y_train)
 
+                # 增强处理
                 for i_file in range(len(X_train)):
                     during_event = False
                     discard_event = False
@@ -207,15 +215,18 @@ class Experiment:
                             discard_event = False
                         elif not during_event and window_label not in ['no-event', 'bite', 'chew-bite']:
                             during_event = True
+                            # 对多数类事件进行随机丢弃
                             if np.random.rand() <= classes_probs[window_label] * 2:
                                 discard_event = True
 
                         if during_event and discard_event:
+                            # 零值替换并标记为无事件
                             for i_channel in range(len(X_train[i_file][i_window])):
                                 window_len = len(X_augmented[i_file][i_window][i_channel])
                                 X_augmented[i_file][i_window][i_channel] = np.zeros(window_len)
                                 y_augmented[i_file][i_window] = 'no-event'
                         else:
+                            # 添加背景噪音
                             for i_channel in range(len(X_train[i_file][i_window])):
                                 sample_rate = 6000 if i_channel == 0 else 100
                                 window = X_augmented[i_file][i_window][i_channel]
@@ -230,17 +241,13 @@ class Experiment:
 
             # 标签编码
             self.target_encoder = LabelEncoder()
-            # 展平y_train获取所有原始标签（处理序列数据）
-            all_raw_labels = np.hstack(y_train) if isinstance(y_train[0], (list, np.ndarray)) else y_train
-            unique_labels = np.unique(all_raw_labels)
+            unique_labels = np.unique(np.hstack(y_train))
             self.target_encoder.fit(unique_labels)
 
-            # 打印原始标签与编码映射
-            logger.info(f"折 {ix_fold} - 原始标签（去重）: {unique_labels}")
-            logger.info(f"折 {ix_fold} - 标签编码映射:")
-            for raw_label, encoded in zip(self.target_encoder.classes_, self.target_encoder.transform(self.target_encoder.classes_)):
-                logger.info(f"  原始标签 '{raw_label}' → 编码值 {encoded}")
-            logger.info(f"折 {ix_fold} - 实际类别数: {len(unique_labels)}, 编码最大值: {max(self.target_encoder.transform(self.target_encoder.classes_)) if len(unique_labels) > 0 else '无'}")
+            # 记录标签映射关系
+            logger.info("标签映射关系：")
+            for idx, label in enumerate(self.target_encoder.classes_):
+                logger.info(f"类别编号 {idx} → 原始标签 '{label}'")
 
             # 编码训练标签
             if self.manage_sequences:
@@ -248,10 +255,14 @@ class Experiment:
             else:
                 y_train_enc = self.target_encoder.transform(y_train)
 
-            # 创建模型实例（移除output_size参数，使用固定输出维度）
-            num_classes = len(unique_labels)
-            model_instance = self.model_factory(parameters_combination)  # 核心修改：移除output_size参数
-            logger.info(f"折 {ix_fold} - 模型实例化：使用固定输出维度（已在模型定义中设置）")
+            # 检查编码标签范围
+            all_enc_labels = np.hstack(y_train_enc)
+            max_label = np.max(all_enc_labels) if len(all_enc_labels) > 0 else -1
+            if max_label >= len(self.target_encoder.classes_):
+                logger.error(f"编码后的标签超出范围：最大值{max_label}，有效类别数{len(self.target_encoder.classes_)}")
+
+            # 创建模型实例
+            model_instance = self.model_factory(parameters_combination)
             self.model = model_instance
             self.set_model_output_path(ix_fold, is_grid_search)
 
@@ -277,55 +288,59 @@ class Experiment:
                     funnel.model.model.layers[ix_layer].set_weights(w)
                 logger.info(f'量化处理已应用，类型：{str(self.quantization)}')
 
-            # 模型预测与评估
-            fold_window_acc = []  # 当前折的窗口级准确率
+            # 模型预测
             for test_signal_key in test_fold_keys:
                 X_test = [self.X[test_signal_key]] if self.manage_sequences else self.X[test_signal_key]
-                # 明确指定不聚合，获取窗口级预测
                 y_signal_pred = funnel.predict(X_test)
 
-                # 打印解码前的编码标签（检查是否有4）
-                logger.info(f"测试片段 {test_signal_key} - 预测编码标签（前10个窗口）: {y_signal_pred[:10]}")
-                logger.info(f"测试片段 {test_signal_key} - 预测编码标签中的唯一值: {np.unique(y_signal_pred)}")
-
                 # 检查预测结果异常
-                pred_flat = y_signal_pred.flatten()
+                pred_flat = np.ravel(y_signal_pred[0]) if self.manage_sequences else y_signal_pred.flatten()
                 unique_pred, counts_pred = np.unique(pred_flat, return_counts=True)
                 pred_dist = dict(zip(unique_pred, counts_pred))
                 logger.info(f"测试片段 {test_signal_key} 预测类别分布：{pred_dist}")
 
-                # 逆编码预测结果（已为窗口级）
+                # 检查异常类别
+                max_expected = len(self.target_encoder.classes_) - 1
+                invalid_preds = [p for p in unique_pred if p > max_expected]
+                if invalid_preds:
+                    for p in invalid_preds:
+                        count = counts_pred[unique_pred == p][0]
+                        logger.warning(f"测试片段 {test_signal_key} 发现异常类别 {p}，共出现 {count} 次")
+                        positions = np.where(pred_flat == p)[0]
+                        logger.info(f"异常类别 {p} 出现的位置索引：{positions[:10]}（仅显示前10个）")
+                        if len(self.y[test_signal_key]) >= len(pred_flat):
+                            true_labels = [self.y[test_signal_key][i] for i in positions if i < len(self.y[test_signal_key])]
+                            logger.info(f"异常类别位置对应的真实标签：{true_labels[:10]}（仅显示前10个）")
+
+                # 逆编码预测结果
+                if self.manage_sequences:
+                    y_signal_pred = np.ravel(y_signal_pred[0])
+                logger.info(f"test_signal_key: {test_signal_key}, y_signal_pred形状: {y_signal_pred.shape}, 类型: {type(y_signal_pred)}")
                 y_signal_pred_labels = self.target_encoder.inverse_transform(y_signal_pred)
 
-                # 计算窗口级准确率
-                y_test = self.y[test_signal_key]
-                # 展平标签以匹配预测结果形状
-                y_test_flat = np.ravel(y_test)
-                window_acc = accuracy_score(y_test_flat, y_signal_pred_labels)
-                fold_window_acc.append(window_acc)
-                logger.info(f"测试片段 {test_signal_key} 窗口级准确率：{window_acc:.4f}")
-                logger.debug(f"窗口级分类报告：\n{classification_report(y_test_flat, y_signal_pred_labels)}")
-
                 # 保存预测结果
-                signal_predictions[test_signal_key] = [y_test_flat, y_signal_pred_labels]
-
-            # 记录当前折的窗口级平均准确率
-            if fold_window_acc:
-                mean_window_acc = np.mean(fold_window_acc)
-                window_metrics.append(mean_window_acc)
-                logger.info(f"折 {ix_fold} 窗口级平均准确率：{mean_window_acc:.4f}")
+                y_test = self.y[test_signal_key]
+                signal_predictions[test_signal_key] = [y_test, y_signal_pred_labels]
 
             # 每折结束释放资源
             logger.info(f"折 {ix_fold} 训练/测试完成，开始释放资源...")
+            # 删除模型和数据
             if hasattr(self, 'model'):
                 del self.model
             if 'funnel' in locals():
                 del funnel
             if 'model_instance' in locals():
                 del model_instance
-            del X_train, y_train, y_train_enc
+            if 'X_train' in locals():
+                del X_train
+            if 'y_train' in locals():
+                del y_train
+            if 'y_train_enc' in locals():
+                del y_train_enc
             if 'X_augmented' in locals():
-                del X_augmented, y_augmented
+                del X_augmented
+                del y_augmented
+            # 清除Keras会话和GPU内存
             tf.keras.backend.clear_session()
             gc.collect()
             try:
@@ -341,13 +356,6 @@ class Experiment:
         logger.info('Fold iterations finished !. Starting evaluation phase.')
         self.save_predictions(signal_predictions)
 
-        # 输出窗口级整体指标
-        if window_metrics:
-            logger.info('-' * 25)
-            logger.info('### 窗口级整体指标 ###')
-            logger.info(f"各折窗口准确率：{[f'{acc:.4f}' for acc in window_metrics]}")
-            logger.info(f"平均窗口准确率：{np.mean(window_metrics):.4f} ± {np.std(window_metrics):.4f}")
-
         unique_labels = list(set(np.concatenate([self.y[k] for k in self.y.keys()])))
         if self.no_event_class in unique_labels:
             unique_labels.remove(self.no_event_class)
@@ -362,49 +370,33 @@ class Experiment:
         return fold_metrics
 
     def save_predictions(self, fold_labels_predictions):
-        '''保存预测结果，新增窗口级标签文件'''
-        # 保存窗口级标签与预测
-        df_window = pd.DataFrame(columns=['segment', 'window_index', 'y_true', 'y_pred'])
+        ''' 保存预测结果并转换为事件格式 '''
+        df = pd.DataFrame(columns=['segment', 'y_true', 'y_pred'])
+
         for segment in fold_labels_predictions.keys():
             y_true = fold_labels_predictions[segment][0]
             y_pred = fold_labels_predictions[segment][1]
-            
-            # 窗口级详情
-            _df = pd.DataFrame({
-                'segment': segment,
-                'window_index': range(len(y_true)),
-                'y_true': y_true,
-                'y_pred': y_pred
-            })
-            df_window = pd.concat([df_window, _df], ignore_index=True)
 
-            # 事件级转换与保存
-            df_labels = windows2events(
-                y_true, 
-                self.window_width, 
-                self.window_overlap,
-                no_event_class=self.no_event_class
-            )
+            # 保存标签与预测的DataFrame
+            _df = pd.DataFrame({'y_true': y_true, 'y_pred': y_pred})
+            _df['segment'] = segment
+            df = pd.concat([df, _df], ignore_index=True)
+
+            # 转换窗口为事件并保存
+            df_labels = windows2events(y_true, self.window_width, self.window_overlap)
             df_labels = df_labels[df_labels.label != self.no_event_class]
             df_labels.to_csv(os.path.join(self.path, f'{segment}_true.txt'),
                              sep='\t', header=False, index=False)
 
-            df_predictions = windows2events(
-                y_pred, 
-                self.window_width, 
-                self.window_overlap,
-                no_event_class=self.no_event_class
-            )
+            df_predictions = windows2events(y_pred, self.window_width, self.window_overlap)
             df_predictions = df_predictions[df_predictions.label != self.no_event_class]
             df_predictions.to_csv(os.path.join(self.path, f'{segment}_pred.txt'),
                                   sep='\t', header=False, index=False)
 
-        # 保存窗口级详情CSV
-        df_window.to_csv(os.path.join(self.path, 'window_level_predictions.csv'), index=False)
-        logger.info(f"窗口级预测结果已保存至 {self.path}/window_level_predictions.csv")
+        df.to_csv(os.path.join(self.path, 'fold_labels_and_predictions.csv'), index=False)
 
     def evaluate(self, unique_labels, folds, verbose=True):
-        '''评估模型性能，区分事件级与窗口级'''
+        ''' 评估模型性能 '''
         target_files = glob(os.path.join(self.path, 'recording_*_true.txt'))
         final_metric = 'f_measure'
         fold_metrics_detail = {}
@@ -426,7 +418,7 @@ class Experiment:
                              'estimated_event_list': estimated_event_list})
                 all_data += reference_event_list
 
-            # 计算事件级指标
+            # 计算片段级和事件级指标
             segment_based_metrics = sed_eval.sound_event.SegmentBasedMetrics(
                 event_label_list=unique_labels,
                 time_resolution=settings.segment_width_value
@@ -459,10 +451,10 @@ class Experiment:
             event_metrics = event_based_metrics.results_overall_metrics()
 
             if verbose:
-                logger.info('### 片段级指标 (fold %s) ###', ix_fold)
+                logger.info('### Segment based metrics (fold %s) ###', ix_fold)
                 logger.info(segment_based_metrics)
                 logger.info('')
-                logger.info('### 事件级指标 (fold %s) ###', ix_fold)
+                logger.info('### Event based metrics (fold %s) ###', ix_fold)
                 logger.info(event_based_metrics)
                 logger.info('-' * 20)
 
@@ -481,24 +473,26 @@ class Experiment:
         folds_std = np.round(np.std(fold_metrics), 6) if fold_metrics else 0.0
 
         if verbose:
-            logger.info('### 事件级整体指标 ###')
-            logger.info(f'事件F1分数均值: {folds_mean}')
-            logger.info(f'事件F1分数标准差: {folds_std}')
+            logger.info('### Event based overall metrics ###')
+            logger.info(f'F1 score (micro) mean for events: {folds_mean}')
+            logger.info(f'F1 score (micro) standard deviation for events: {folds_std}')
             logger.info('-' * 20)
 
         return folds_mean
 
     def set_model_output_path(self, n_fold, is_grid_search=False):
-        '''设置模型输出路径'''
+        ''' 设置模型输出路径 '''
         output_logs_path = os.path.join(self.path, f'logs_fold_{n_fold}')
         output_model_checkpoint_path = os.path.join(self.path, f'model_checkpoints_fold_{n_fold}')
 
+        # 非网格搜索时检查路径是否存在
         if not is_grid_search:
             if os.path.exists(output_logs_path):
                 raise FileExistsError('Model output logs path already exists!')
             if os.path.exists(output_model_checkpoint_path):
                 raise FileExistsError('Model output checkpoints path already exists!')
 
+        # 创建路径并赋值给模型
         os.makedirs(output_logs_path, exist_ok=True)
         self.model.output_logs_path = output_logs_path
 
@@ -507,7 +501,7 @@ class Experiment:
 
 
 class Funnel:
-    '''类似sklearn Pipeline的接口，用于并行特征处理'''
+    ''' 类似sklearn Pipeline的接口，用于并行特征处理 '''
     def __init__(self,
                  features_factory,
                  model_instance,
@@ -522,7 +516,7 @@ class Funnel:
         self.use_raw_data = use_raw_data
 
     def fit(self, X, y):
-        '''拟合特征并训练模型'''
+        ''' 拟合特征并训练模型 '''
         X_features = []
         for feature in self.features:
             logger.info(f'Processing the feature {feature.feature.__class__.__name__}.')
@@ -535,7 +529,7 @@ class Funnel:
         self.model.fit(X_features, y)
 
     def predict(self, X):
-        '''特征转换并预测'''
+        ''' 特征转换并预测 '''
         X_features = []
         for feature in self.features:
             X_features.append(feature.transform(X))
@@ -543,5 +537,4 @@ class Funnel:
         if not self.use_raw_data:
             X_features = np.concatenate(X_features, axis=1)
 
-        # 调用模型预测时不聚合，返回窗口级结果
-        return self.model.predict(X_features, aggregate=False)
+        return self.model.predict(X_features)
