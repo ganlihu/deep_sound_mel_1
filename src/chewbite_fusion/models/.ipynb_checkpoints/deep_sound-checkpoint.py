@@ -71,17 +71,37 @@ def check_input_data(data, resource_logger, batch_num):
     except (ValueError, TypeError):
         batch_num_int = str(batch_num_val)
 
-    # 用安全转换后的值进行日志输出（避免直接格式化Tensor）
-    log_message = (
-        f"输入数据检查 - 批次 {batch_num_int}:\n"
-        f"  数据范围: [{min_val.numpy():.6f}, {max_val.numpy():.6f}]\n"
-        f"  均值: {mean_val.numpy():.6f}, 标准差: {std_val.numpy():.6f}\n"
-        f"  含NaN: {has_nan.numpy()}, 含Inf: {has_inf.numpy()}"
-    )
-    resource_logger.log(log_message)
+    # 修复：改进tensor_to_str函数，确保格式字符串与输入张量匹配
+    def tensor_to_str(tensor, fmt):
+        if tf.executing_eagerly():
+            # Eager模式下使用Python格式化
+            return fmt.format(tensor.numpy())
+        else:
+            # Graph模式下使用tf.strings.format，关键修复：
+            # 1. 使用tf.strings.as_string处理单个张量的格式化
+            # 2. 移除格式字符串中的占位符括号，仅保留格式说明
+            fmt_spec = fmt.replace("{", "").replace("}", "")
+            return tf.strings.as_string(tensor, format_spec=fmt_spec)
     
-    # 如果发现异常值，记录更多信息
-    if has_nan.numpy() or has_inf.numpy():
+    # 修复：保持格式字符串，但让tensor_to_str函数正确处理
+    log_parts = [
+        f"输入数据检查 - 批次 {batch_num_int}:\n",
+        f"  数据范围: [{tensor_to_str(min_val, '{:.6f}')}, {tensor_to_str(max_val, '{:.6f}')}]\n",
+        f"  均值: {tensor_to_str(mean_val, '{:.6f}')}, 标准差: {tensor_to_str(std_val, '{:.6f}')}\n",
+        f"  含NaN: {has_nan.numpy() if tf.executing_eagerly() else '待计算'}, 含Inf: {has_inf.numpy() if tf.executing_eagerly() else '待计算'}"
+    ]
+    
+    # 合并日志消息（兼容Eager和Graph模式）
+    if tf.executing_eagerly():
+        log_message = ''.join(log_parts)
+        resource_logger.log(log_message)
+    else:
+        # 在graph模式下不使用.numpy()，直接使用tf.print输出
+        log_message = tf.strings.join(log_parts)
+        tf.print(log_message)
+    
+    # 如果发现异常值，记录更多信息（仅在Eager模式下处理）
+    if tf.executing_eagerly() and (has_nan.numpy() or has_inf.numpy()):
         nan_indices = tf.where(tf.math.is_nan(data))
         inf_indices = tf.where(tf.math.is_inf(data))
         resource_logger.log(f"  NaN位置: {nan_indices.numpy()[:5]} (最多显示5个)\n"
@@ -475,21 +495,24 @@ class Conv1DWeightMonitor(Callback):
                 kernel = conv1d_5.kernel
                 bias = conv1d_5.bias
                 
-                # 记录权重范围
-                kernel_min = tf.reduce_min(kernel)
-                kernel_max = tf.reduce_max(kernel)
-                bias_min = tf.reduce_min(bias)
-                bias_max = tf.reduce_max(bias)
+                # 记录权重范围（修复：兼容计算图模式）
+                def get_val(tensor):
+                    return tensor.numpy() if tf.executing_eagerly() else "无法获取"
+                
+                kernel_min = get_val(tf.reduce_min(kernel))
+                kernel_max = get_val(tf.reduce_max(kernel))
+                bias_min = get_val(tf.reduce_min(bias))
+                bias_max = get_val(tf.reduce_max(bias))
                 
                 # 检查是否有NaN
-                has_nan_kernel = tf.reduce_any(tf.math.is_nan(kernel))
-                has_nan_bias = tf.reduce_any(tf.math.is_nan(bias))
+                has_nan_kernel = get_val(tf.reduce_any(tf.math.is_nan(kernel)))
+                has_nan_bias = get_val(tf.reduce_any(tf.math.is_nan(bias)))
                 
                 self.resource_logger.log(
                     f"conv1d_5 权重监控 - 批次 {batch}:\n"
-                    f"  权重范围: [{kernel_min.numpy():.6f}, {kernel_max.numpy():.6f}]\n"
-                    f"  偏置范围: [{bias_min.numpy():.6f}, {bias_max.numpy():.6f}]\n"
-                    f"  权重含NaN: {has_nan_kernel.numpy()}, 偏置含NaN: {has_nan_bias.numpy()}"
+                    f"  权重范围: [{kernel_min:.6f}, {kernel_max:.6f}]\n"
+                    f"  偏置范围: [{bias_min:.6f}, {bias_max:.6f}]\n"
+                    f"  权重含NaN: {has_nan_kernel}, 偏置含NaN: {has_nan_bias}"
                 )
             except Exception as e:
                 self.resource_logger.log(f"conv1d_5权重监控出错: {str(e)}")
@@ -530,18 +553,21 @@ class Conv1DGradientMonitor(Callback):
                 conv1d_5 = self.model.get_layer('conv1d_5')
                 grads = tape.gradient(loss, conv1d_5.trainable_weights)
                 
-                # 分析梯度
+                # 分析梯度（修复：兼容计算图模式）
+                def get_val(tensor):
+                    return tensor.numpy() if tf.executing_eagerly() else "无法获取"
+                
                 for grad, var in zip(grads, conv1d_5.trainable_weights):
                     if grad is not None:
-                        grad_min = tf.reduce_min(grad)
-                        grad_max = tf.reduce_max(grad)
-                        has_nan = tf.reduce_any(tf.math.is_nan(grad))
-                        has_inf = tf.reduce_any(tf.math.is_inf(grad))
+                        grad_min = get_val(tf.reduce_min(grad))
+                        grad_max = get_val(tf.reduce_max(grad))
+                        has_nan = get_val(tf.reduce_any(tf.math.is_nan(grad)))
+                        has_inf = get_val(tf.reduce_any(tf.math.is_inf(grad)))
                         
                         self.resource_logger.log(
                             f"conv1d_5 梯度监控 - 批次 {batch} - {var.name}:\n"
-                            f"  梯度范围: [{grad_min.numpy():.6f}, {grad_max.numpy():.6f}]\n"
-                            f"  含NaN: {has_nan.numpy()}, 含Inf: {has_inf.numpy()}"
+                            f"  梯度范围: [{grad_min:.6f}, {grad_max:.6f}]\n"
+                            f"  含NaN: {has_nan}, 含Inf: {has_inf}"
                         )
             except Exception as e:
                 self.resource_logger.log(f"conv1d_5梯度监控出错: {str(e)}")
