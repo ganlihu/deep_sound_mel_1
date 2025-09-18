@@ -59,7 +59,7 @@ def merge_contiguous(df):
         else:
             merged.append(row.to_dict())
     
-    logger.debug(f"合并完成：共合并{merge_count}次，合并后事件类型分布：{merged_df['label'].value_counts().to_dict()}")
+    logger.debug(f"合并完成：共合并{merge_count}次，合并后事件类型分布：{pd.DataFrame(merged)['label'].value_counts().to_dict()}")
     return pd.DataFrame(merged)
 
 
@@ -185,3 +185,26 @@ class NaNDetector:
             
             return result
         return wrapper
+
+
+class AudioExtremeDetector:
+    """音频极端值检测工具，追踪处理链中的极端值"""
+    def __init__(self, extreme_threshold=(-1.0, 1.0)):
+        self.low, self.high = extreme_threshold
+        self.process_history = []
+    
+    def log_process(self, step):
+        self.process_history.append(step)
+    
+    def check_extreme(self, data, step_name):
+        self.log_process(step_name)
+        if isinstance(data, np.ndarray):
+            min_val = np.min(data)
+            max_val = np.max(data)
+            extreme_count = np.sum((data < self.low) | (data > self.high))
+            if extreme_count > 0:
+                logger.warning(
+                    f"步骤[{step_name}]出现极端值: min={min_val:.4f}, max={max_val:.4f}, "
+                    f"数量={extreme_count}, 处理链: {'->'.join(self.process_history)}"
+                )
+        return data

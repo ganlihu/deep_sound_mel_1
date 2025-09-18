@@ -10,6 +10,7 @@ import more_itertools
 
 from chewbite_fusion.data.cache_manager import DatasetCache
 from chewbite_fusion.data import utils_data_sources as utils
+from chewbite_fusion.data.utils import AudioExtremeDetector  # 导入工具类
 
 
 logger = logging.getLogger(__name__)
@@ -61,47 +62,8 @@ def main(data_source_names=['zavalla2022'],
         -------
         X : Dictionary-like object, with data sources as keys.
             Each value represent segments of data, and include all extracted windows.
-            Example:
-            X = {
-                'zavalla2022': {
-                    'segment_1_cel_1': [
-                        [
-                                                    # window 1
-                            [0.83, 0.55, 0.21],     # audio mono
-                            [0.0, 0.1, 0.17],       # acc x
-                            [0.0, 0.52, 0.49],      # acc y
-                            [0.0, -0.07, -0.14],    # acc z
-                            [0.0, 0.1, 0.17],       # gyr x
-                            [0.0, 0.52, 0.49],      # gyr y
-                            [0.0, -0.07, -0.14],    # gyr z
-                            [0.0, 0.1, 0.17],       # mag x
-                            [0.0, 0.52, 0.49],      # mag y
-                            [0.0, -0.07, -0.14],    # mag z
-                                                    # OPTIONAL
-                            [0.2, -0.08, 1.15],     # acc magnitude
-                            [0.0, 0.0, 0.1],        # gyr magnitude
-                            [1.0, 0.97, 0.89],      # mag magnitude
-                        ],
-                        [
-                            ...
-                        ]
-                    ]
-                }
-            }
         y : Dictionary-like object, with data sources as keys.
             Each value represent segments of data, and include labels for each window.
-            Example:
-            y = {
-                'zavalla2022': {
-                    'segment_1_cel_1': [
-                        'no-event',                 # window 1
-                        'no-event',                 # window 2
-                        'chew',                     # window 3
-                        ...
-                    ],
-                    ...
-                }
-            }
     """
     logger = logging.getLogger(__name__)
 
@@ -168,12 +130,43 @@ def main(data_source_names=['zavalla2022'],
             
             
             logger.info("> Processing segment: %s", segment_name)
+            
+            # 初始化极端值检测器
+            detector = AudioExtremeDetector()
 
             # Read audio file.
             audio_signal, sf = librosa.load(segment[0])
-            audio_signal = librosa.resample(y=audio_signal,
-                                            orig_sr=sf,
-                                            target_sr=audio_sampling_frequency)
+            # 检测原始音频极端值（振幅超出[-1,1]）
+            orig_min = np.min(audio_signal)
+            orig_max = np.max(audio_signal)
+            extreme_mask = (audio_signal < -1.0) | (audio_signal > 1.0)
+            extreme_count = np.sum(extreme_mask)
+            if extreme_count > 0:
+                logger.warning(
+                    f"原始音频{segment[0]}存在{extreme_count}个极端值（超出[-1,1]），"
+                    f"占比{extreme_count/len(audio_signal):.2%}，min={orig_min:.4f}, max={orig_max:.4f}"
+                )
+            # 工具类检测（可选）
+            audio_signal = detector.check_extreme(audio_signal, "原始音频加载")
+
+            # 重采样
+            audio_signal = librosa.resample(
+                y=audio_signal,
+                orig_sr=sf,
+                target_sr=audio_sampling_frequency
+            )
+            # 检测重采样后的极端值
+            resample_min = np.min(audio_signal)
+            resample_max = np.max(audio_signal)
+            resample_extreme_mask = (audio_signal < -1.0) | (audio_signal > 1.0)
+            resample_extreme_count = np.sum(resample_extreme_mask)
+            if resample_extreme_count > 0:
+                logger.warning(
+                    f"重采样后音频存在{resample_extreme_count}个极端值，"
+                    f"占比{resample_extreme_count/len(audio_signal):.2%}，min={resample_min:.4f}, max={resample_max:.4f}"
+                )
+            # 工具类检测（可选）
+            audio_signal = detector.check_extreme(audio_signal, "重采样后")
 
             dataset_has_movement_data = len(segment) > 2
 
@@ -196,15 +189,16 @@ def main(data_source_names=['zavalla2022'],
 
                 if include_movement_magnitudes:
                     accelerometer_magnitude = \
-                        np.sqrt(imu_data[0] ** 2 + imu_data[1] ** 2 + imu_data[2] ** 2)
+                        np.sqrt(imu_data[0] **2 + imu_data[1]** 2 + imu_data[2] **2)
                     imu_data.append(accelerometer_magnitude)
                     gyroscope_magnitude = \
-                        np.sqrt(imu_data[3] ** 2 + imu_data[4] ** 2 + imu_data[5] ** 2)
+                        np.sqrt(imu_data[3]** 2 + imu_data[4] **2 + imu_data[5]** 2)
                     imu_data.append(gyroscope_magnitude)
                     magnetometer_magnitude = \
-                        np.sqrt(imu_data[6] ** 2 + imu_data[7] ** 2 + imu_data[8] ** 2)
+                        np.sqrt(imu_data[6] **2 + imu_data[7]** 2 + imu_data[8] **2)
                     imu_data.append(magnetometer_magnitude)
 
+            # 应用滤波器
             if filters:
                 for filter in filters:
                     for channel in filter[1]:
@@ -212,7 +206,21 @@ def main(data_source_names=['zavalla2022'],
                         if filter[2] and dataset_has_movement_data:
                             imu_data[channel] = filter_method(imu_data[channel])
                         else:
+                            # 对音频信号滤波
                             audio_signal = filter_method(audio_signal)
+                            
+                            # 检测滤波后的极端值
+                            filter_min = np.min(audio_signal)
+                            filter_max = np.max(audio_signal)
+                            filter_extreme_mask = (audio_signal < -1.0) | (audio_signal > 1.0)
+                            filter_extreme_count = np.sum(filter_extreme_mask)
+                            if filter_extreme_count > 0:
+                                logger.warning(
+                                    f"滤波后音频存在{filter_extreme_count}个极端值，"
+                                    f"占比{filter_extreme_count/len(audio_signal):.2%}，min={filter_min:.4f}, max={filter_max:.4f}"
+                                )
+                            # 工具类检测（可选）
+                            audio_signal = detector.check_extreme(audio_signal, f"滤波处理-{filter_method.__name__}")
 
             # Read labels file.
             df_segment_labels = pd.read_csv(
@@ -220,19 +228,28 @@ def main(data_source_names=['zavalla2022'],
                 sep='\t',
                 names=["start", "end", "jm_event"])
 
-            # general_mask = df_segment_labels.jm_event
-            # df_segment_labels.loc[general_mask == 'u', 'jm_event'] = 'unknown'
-            # df_segment_labels.loc[general_mask == 'b', 'jm_event'] = 'bite'
-            # df_segment_labels.loc[general_mask == 'c', 'jm_event'] = 'grazing-chew'
-            # df_segment_labels.loc[general_mask == 'r', 'jm_event'] = 'rumination-chew'
-            # df_segment_labels.loc[general_mask == 'x', 'jm_event'] = 'chewbite'
-
             # Get windows from signals.
             audio_windows = get_windows_from_audio_signal(
                 audio_signal,
                 sampling_frequency=audio_sampling_frequency,
                 window_width=window_width,
                 window_overlap=window_overlap)
+            
+            # 检测每个窗口的极端值
+            window_extreme_counts = []
+            for i, window in enumerate(audio_windows):
+                window_min = np.min(window)
+                window_max = np.max(window)
+                if window_min < -1.0 or window_max > 1.0:
+                    extreme_in_window = np.sum((window < -1.0) | (window > 1.0))
+                    window_extreme_counts.append(i)
+                    logger.debug(
+                        f"窗口{i}存在{extreme_in_window}个极端值，min={window_min:.4f}, max={window_max:.4f}"
+                    )
+            if window_extreme_counts:
+                logger.warning(
+                    f"共{len(window_extreme_counts)}个窗口含极端值，占比{len(window_extreme_counts)/len(audio_windows):.2%}"
+                )
 
             
             # 添加日志：打印音频长度和窗口数量
@@ -435,13 +452,9 @@ def get_windows_labels(
             exist_overlap_for_window = False
             for ix_o, overlap in enumerate(overlappings):
                 # If the window contains the entire event, asign the label.
-                # event:            |     |
-                # window:        |            |
                 window_contains_the_event = (overlap[0] / overlap[3]) == 1
 
                 # If overlap % compared to window width reachs the threshold, asign the label.
-                # event:        | ------|       - (overlap)
-                # window:        |------   |
                 relative_overlap = (overlap[0] / window_width)
                 overlap_reachs_threshold = relative_overlap >= label_overlapping_threshold
 

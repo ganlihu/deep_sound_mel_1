@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 import pickle
 import gc  # 垃圾回收模块
@@ -17,6 +18,21 @@ import tensorflow as tf  # 导入TensorFlow
 from chewbite_fusion.data.utils import windows2events
 from chewbite_fusion.experiments import settings
 from chewbite_fusion.experiments.utils import set_random_init
+
+
+# 自定义日志处理器，同时处理stdout和stderr
+class StreamToLogger:
+    def __init__(self, logger, log_level=logging.INFO):
+        self.logger = logger
+        self.log_level = log_level
+        self.linebuf = ''
+
+    def write(self, buf):
+        for line in buf.rstrip().splitlines():
+            self.logger.log(self.log_level, line.rstrip())
+
+    def flush(self):
+        pass
 
 
 logger = logging.getLogger('yaer')
@@ -62,88 +78,122 @@ class Experiment:
         self.path = os.path.join(settings.experiments_path, name, self.timestamp)
         os.makedirs(self.path, exist_ok=True)
 
-        # 配置日志（文件和标准输出）
-        logger.handlers = []
+        # 配置日志（同时输出到文件和控制台，捕获所有输出）
+        logger.handlers = []  # 清空现有处理器
+        logger.setLevel(logging.DEBUG)  # 设置最低日志级别为DEBUG
+
+        # 文件处理器 - 保存所有日志到文件
         fileHandler = logging.FileHandler(f"{self.path}/experiment.log")
+        # 控制台处理器 - 在控制台显示
+        consoleHandler = logging.StreamHandler()
+
+        # 统一日志格式
         formatter = logging.Formatter(
             fmt='%(asctime)s %(levelname)-8s %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         fileHandler.setFormatter(formatter)
+        consoleHandler.setFormatter(formatter)
+
+        # 设置处理器日志级别
+        fileHandler.setLevel(logging.DEBUG)
+        consoleHandler.setLevel(logging.DEBUG)
+
+        # 添加处理器
         logger.addHandler(fileHandler)
+        logger.addHandler(consoleHandler)
+
+        # 重定向stdout和stderr到日志
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+        sys.stdout = StreamToLogger(logger, logging.INFO)
+        sys.stderr = StreamToLogger(logger, logging.ERROR)
 
         # 设置随机种子
         set_random_init()
 
+    def __del__(self):
+        # 恢复stdout和stderr
+        try:
+            sys.stdout = self.original_stdout
+            sys.stderr = self.original_stderr
+        except:
+            pass
+
     def run(self):
         ''' 运行实验并保存相关信息 '''
-        self.X = self.X['zavalla2022']
-        self.y = self.y['zavalla2022']
+        try:
+            self.X = self.X['zavalla2022']
+            self.y = self.y['zavalla2022']
 
-        # 验证片段ID解析
-        for k in self.X.keys():
-            try:
-                seg_id = int(k.split('_')[1])
-                logger.debug(f'Segment {k} parsed to ID {seg_id}')
-            except:
-                logger.error(f'Failed to parse segment ID from {k}')
+            # 验证片段ID解析
+            for k in self.X.keys():
+                try:
+                    seg_id = int(k.split('_')[1])
+                    logger.debug(f'Segment {k} parsed to ID {seg_id}')
+                except:
+                    logger.error(f'Failed to parse segment ID from {k}')
 
-        # 折叠划分（基于反刍片段的分层随机抽样）
-        folds = {
-            '1': [40, 41, 7, 37, 26, 24, 17, 48, 21, 5],
-            '2': [33, 52, 23, 4, 15, 36, 49, 18, 28, 50],
-            '3': [35, 27, 44, 20, 9, 51, 31, 3, 16, 42],
-            '4': [22, 39, 32, 45, 34, 2, 8, 30, 29, 1],
-            '5': [19, 10, 6, 43, 47, 13, 11, 14, 12, 38, 25, 46]
-        }
+            # 折叠划分（基于反刍片段的分层随机抽样）
+            folds = {
+                '1': [40, 41, 7, 37, 26, 24, 17, 48, 21, 5],
+                '2': [33, 52, 23, 4, 15, 36, 49, 18, 28, 50],
+                '3': [35, 27, 44, 20, 9, 51, 31, 3, 16, 42],
+                '4': [22, 39, 32, 45, 34, 2, 8, 30, 29, 1],
+                '5': [19, 10, 6, 43, 47, 13, 11, 14, 12, 38, 25, 46]
+            }
 
-        self.train_validation_segments = [seg for fold in folds.values() for seg in fold]
+            self.train_validation_segments = [seg for fold in folds.values() for seg in fold]
 
-        # 记录训练验证片段信息
-        logger.info('train_validation_segments count: %d', len(self.train_validation_segments))
-        logger.info('train_validation_segments: %s', self.train_validation_segments)
+            # 记录训练验证片段信息
+            logger.info('train_validation_segments count: %d', len(self.train_validation_segments))
+            logger.info('train_validation_segments: %s', self.train_validation_segments)
 
-        hash_method_instance = hashlib.new('sha256')
-        params_results = {}
-        full_grid = list(ParameterGrid(self.model_parameters_grid))
+            hash_method_instance = hashlib.new('sha256')
+            params_results = {}
+            full_grid = list(ParameterGrid(self.model_parameters_grid))
 
-        if len(full_grid) > 1:
-            for params_combination in full_grid:
-                if params_combination:
-                    logger.info('Running folds for parameters combination: %s.', params_combination)
-                else:
-                    logger.info('Running folds without grid search.')
+            if len(full_grid) > 1:
+                for params_combination in full_grid:
+                    if params_combination:
+                        logger.info('Running folds for parameters combination: %s.', params_combination)
+                    else:
+                        logger.info('Running folds without grid search.')
 
-                # 生成参数哈希值
-                hash_method_instance.update(str(params_combination).encode())
-                params_combination_hash = hash_method_instance.hexdigest()
+                    # 生成参数哈希值
+                    hash_method_instance.update(str(params_combination).encode())
+                    params_combination_hash = hash_method_instance.hexdigest()
 
-                # 执行k折交叉验证
-                params_combination_result = self.execute_kfoldcv(
-                    folds=folds,
-                    is_grid_search=True,
-                    parameters_combination=params_combination
-                )
+                    # 执行k折交叉验证
+                    params_combination_result = self.execute_kfoldcv(
+                        folds=folds,
+                        is_grid_search=True,
+                        parameters_combination=params_combination
+                    )
 
-                params_results[params_combination_hash] = (params_combination_result, params_combination)
+                    params_results[params_combination_hash] = (params_combination_result, params_combination)
 
-            # 选择最佳参数组合
-            best_params_combination = max(params_results.values(), key=lambda i: i[0])[1]
-            logger.info('-' * 25)
-            logger.info('>>> All params combination values: %s <<<', str(params_results))
-            logger.info('-' * 25)
-            logger.info('>>> Best params combination: %s <<<', best_params_combination)
-        else:
-            logger.info('-' * 25)
-            logger.info('>>> Skipping grid search! No params dict provided. <<<')
-            best_params_combination = full_grid[0] if full_grid else {}
+                # 选择最佳参数组合
+                best_params_combination = max(params_results.values(), key=lambda i: i[0])[1]
+                logger.info('-' * 25)
+                logger.info('>>> All params combination values: %s <<<', str(params_results))
+                logger.info('-' * 25)
+                logger.info('>>> Best params combination: %s <<<', best_params_combination)
+            else:
+                logger.info('-' * 25)
+                logger.info('>>> Skipping grid search! No params dict provided. <<<')
+                best_params_combination = full_grid[0] if full_grid else {}
 
-        # 使用最佳参数执行最终交叉验证
-        self.execute_kfoldcv(
-            folds=folds,
-            is_grid_search=False,
-            parameters_combination=best_params_combination
-        )
+            # 使用最佳参数执行最终交叉验证
+            self.execute_kfoldcv(
+                folds=folds,
+                is_grid_search=False,
+                parameters_combination=best_params_combination
+            )
+        finally:
+            # 确保在实验结束时恢复标准输出
+            sys.stdout = self.original_stdout
+            sys.stderr = self.original_stderr
 
     def execute_kfoldcv(self, folds, is_grid_search, parameters_combination):
         ''' 使用特定参数执行k折交叉验证 '''

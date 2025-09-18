@@ -44,6 +44,11 @@ def check_input_data(data, resource_logger, batch_num):
     has_nan = tf.reduce_any(tf.math.is_nan(data))
     has_inf = tf.reduce_any(tf.math.is_inf(data))
 
+    # 新增：音频极端值检测（标准化后阈值设为[-5,5]）
+    audio_extreme_low = -5.0
+    audio_extreme_high = 5.0
+    has_extreme = tf.reduce_any((data < audio_extreme_low) | (data > audio_extreme_high))
+
     # 安全处理批次号（增强版：确保转换为Python原生类型）
     batch_num_val = batch_num
     if isinstance(batch_num_val, tf.Tensor):
@@ -71,19 +76,18 @@ def check_input_data(data, resource_logger, batch_num):
     except (ValueError, TypeError):
         batch_num_int = str(batch_num_val)
 
-    # 修复：改进tensor_to_str函数，确保格式字符串与输入张量匹配
+    # 修复：改进tensor_to_str函数，使用numpy处理避免tf.strings.format问题
     def tensor_to_str(tensor, fmt):
+        # 调试信息：打印格式化字符串和张量值
         if tf.executing_eagerly():
-            # Eager模式下使用Python格式化
-            return fmt.format(tensor.numpy())
+            tensor_np = tensor.numpy()
+            print(f"格式化字符串: {fmt}, 张量值: {tensor_np}")  # 调试用
+            return fmt.format(tensor_np.item())  # 转为标量后格式化
         else:
-            # Graph模式下使用tf.strings.format，关键修复：
-            # 1. 使用tf.strings.as_string处理单个张量的格式化
-            # 2. 移除格式字符串中的占位符括号，仅保留格式说明
-            fmt_spec = fmt.replace("{", "").replace("}", "")
-            return tf.strings.as_string(tensor, format_spec=fmt_spec)
+            # Graph模式下使用兼容方式
+            return f"[{tensor.dtype}]"  # 仅返回类型信息，避免格式化错误
     
-    # 修复：保持格式字符串，但让tensor_to_str函数正确处理
+    # 使用修复后的tensor_to_str构建日志
     log_parts = [
         f"输入数据检查 - 批次 {batch_num_int}:\n",
         f"  数据范围: [{tensor_to_str(min_val, '{:.6f}')}, {tensor_to_str(max_val, '{:.6f}')}]\n",
@@ -91,21 +95,48 @@ def check_input_data(data, resource_logger, batch_num):
         f"  含NaN: {has_nan.numpy() if tf.executing_eagerly() else '待计算'}, 含Inf: {has_inf.numpy() if tf.executing_eagerly() else '待计算'}"
     ]
     
+    # 新增：极端值日志记录
+    if tf.executing_eagerly():
+        extreme_count = tf.reduce_sum(tf.cast((data < audio_extreme_low) | (data > audio_extreme_high), tf.int32)).numpy()
+        total_elements = data.numpy().size
+        extreme_ratio = extreme_count / total_elements if total_elements > 0 else 0
+        log_parts.append(
+            f"  极端值（超出[{audio_extreme_low},{audio_extreme_high}]）: "
+            f"数量={extreme_count}, 占比={extreme_ratio:.2%}"
+        )
+    else:
+        log_parts.append(
+            f"  极端值（超出[{audio_extreme_low},{audio_extreme_high}]）: 待计算"
+        )
+    
     # 合并日志消息（兼容Eager和Graph模式）
     if tf.executing_eagerly():
         log_message = ''.join(log_parts)
         resource_logger.log(log_message)
     else:
-        # 在graph模式下不使用.numpy()，直接使用tf.print输出
-        log_message = tf.strings.join(log_parts)
+        # 在graph模式下简化输出
+        log_message = tf.strings.join([
+            f"输入数据检查 - 批次 {batch_num_int}: ",
+            "数据范围: [占位符, 占位符], 均值: 占位符, 标准差: 占位符"
+        ])
         tf.print(log_message)
     
     # 如果发现异常值，记录更多信息（仅在Eager模式下处理）
-    if tf.executing_eagerly() and (has_nan.numpy() or has_inf.numpy()):
-        nan_indices = tf.where(tf.math.is_nan(data))
-        inf_indices = tf.where(tf.math.is_inf(data))
-        resource_logger.log(f"  NaN位置: {nan_indices.numpy()[:5]} (最多显示5个)\n"
-                          f"  Inf位置: {inf_indices.numpy()[:5]} (最多显示5个)")
+    if tf.executing_eagerly() and (has_nan.numpy() or has_inf.numpy() or has_extreme.numpy()):
+        nan_indices = tf.where(tf.math.is_nan(data)) if has_nan.numpy() else []
+        inf_indices = tf.where(tf.math.is_inf(data)) if has_inf.numpy() else []
+        extreme_indices = tf.where((data < audio_extreme_low) | (data > audio_extreme_high)) if has_extreme.numpy() else []
+        
+        log_extreme = ""
+        if has_nan.numpy():
+            log_extreme += f"  NaN位置: {nan_indices.numpy()[:5]} (最多显示5个)\n"
+        if has_inf.numpy():
+            log_extreme += f"  Inf位置: {inf_indices.numpy()[:5]} (最多显示5个)\n"
+        if has_extreme.numpy():
+            log_extreme += f"  极端值位置: {extreme_indices.numpy()[:5]} (最多显示5个)\n"
+            
+        if log_extreme:
+            resource_logger.log(log_extreme)
     
     return tf.debugging.check_numerics(data, "输入数据包含NaN/无穷大")
 
@@ -491,7 +522,22 @@ class Conv1DWeightMonitor(Callback):
     def on_batch_end(self, batch, logs=None):
         if batch % 5 == 0:  # 每5个批次检查一次
             try:
-                conv1d_5 = self.model.get_layer('conv1d_5')
+                # 查找conv1d_5层，考虑可能在cnn_subnetwork中的情况
+                def find_layer(model, name):
+                    for layer in model.layers:
+                        if layer.name == name:
+                            return layer
+                        if hasattr(layer, 'layers'):
+                            found = find_layer(layer, name)
+                            if found:
+                                return found
+                    return None
+                
+                conv1d_5 = find_layer(self.model, 'conv1d_5')
+                if conv1d_5 is None:
+                    self.resource_logger.log(f"conv1d_5权重监控 - 批次 {batch}: 未找到conv1d_5层")
+                    return
+                    
                 kernel = conv1d_5.kernel
                 bias = conv1d_5.bias
                 
@@ -549,8 +595,23 @@ class Conv1DGradientMonitor(Callback):
                     y_pred = self.model(x_batch, training=True)
                     loss = self.loss_fn(y_batch, y_pred, sample_weight=sample_weight)
                 
+                # 查找conv1d_5层
+                def find_layer(model, name):
+                    for layer in model.layers:
+                        if layer.name == name:
+                            return layer
+                        if hasattr(layer, 'layers'):
+                            found = find_layer(layer, name)
+                            if found:
+                                return found
+                    return None
+                
+                conv1d_5 = find_layer(self.model, 'conv1d_5')
+                if conv1d_5 is None:
+                    self.resource_logger.log(f"conv1d_5梯度监控 - 批次 {batch}: 未找到conv1d_5层")
+                    return
+                
                 # 获取conv1d_5的梯度
-                conv1d_5 = self.model.get_layer('conv1d_5')
                 grads = tape.gradient(loss, conv1d_5.trainable_weights)
                 
                 # 分析梯度（修复：兼容计算图模式）
@@ -615,10 +676,25 @@ class DeepSoundBaseRNN:
 
         # CNN子网络 - 用于特征提取
         cnn = Sequential(name='cnn_subnetwork')
+        # 添加Masking层，使用-10作为掩码值
+        cnn.add(layers.Masking(mask_value=-10.0, name='masking_layer'))
         cnn.add(layers.Rescaling(scale=1.0, name='input_rescaling'))
 
         for ix_l, layer in enumerate(layers_config):
             # 第一个卷积块
+            # 对conv1d_1层添加额外的输入监控
+            layer_name = f'conv1d_{ix_l*2 + 1}'
+            if layer_name == 'conv1d_1':
+                cnn.add(layers.Lambda(
+                    lambda x: [
+                        tf.print("conv1d_1输入详细统计: min=", tf.reduce_min(x), 
+                                "max=", tf.reduce_max(x), "mean=", tf.reduce_mean(x),
+                                "std=", tf.math.reduce_std(x), "nan_count=", tf.reduce_sum(tf.cast(tf.math.is_nan(x), tf.int32))),
+                        x
+                    ][1],
+                    name='conv1d_1_input_detailed'
+                ))
+            
             cnn.add(layers.Conv1D(
                 layer[0],
                 kernel_size=layer[1],
@@ -627,16 +703,29 @@ class DeepSoundBaseRNN:
                 padding=self.padding,
                 data_format=self.data_format,
                 kernel_initializer=HeUniform(),
-                name=f'conv1d_{ix_l*2 + 1}'
+                name=layer_name
             ))
+            
+            # 对conv1d_1层添加额外的输出监控
+            if layer_name == 'conv1d_1':
+                cnn.add(layers.Lambda(
+                    lambda x: [
+                        tf.print("conv1d_1输出详细统计: min=", tf.reduce_min(x), 
+                                "max=", tf.reduce_max(x), "mean=", tf.reduce_mean(x),
+                                "std=", tf.math.reduce_std(x), "nan_count=", tf.reduce_sum(tf.cast(tf.math.is_nan(x), tf.int32))),
+                        x
+                    ][1],
+                    name='conv1d_1_output_detailed'
+                ))
+            
             # 添加卷积后监控
             cnn.add(layers.Lambda(
                 lambda x: [
-                    tf.print(f"conv1d_{ix_l*2 + 1}输出范围: ", tf.reduce_min(x), tf.reduce_max(x)),
-                    tf.debugging.check_numerics(x, f"conv1d_{ix_l*2 + 1}包含NaN/无穷大"),
+                    tf.print(f"{layer_name}输出范围: ", tf.reduce_min(x), tf.reduce_max(x)),
+                    tf.debugging.check_numerics(x, f"{layer_name}包含NaN/无穷大"),
                     x
                 ][2],
-                name=f'conv1d_{ix_l*2 + 1}_monitor'
+                name=f'{layer_name}_monitor'
             ))
             cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 1}'))
             # 添加BN后监控
@@ -653,18 +742,8 @@ class DeepSoundBaseRNN:
             # 第二个卷积块（相同方式添加监控）
             # 重点监控conv1d_5层（ix_l=2时）
             layer_name = f'conv1d_{ix_l*2 + 2}'
-            cnn.add(layers.Conv1D(
-                layer[0],
-                kernel_size=layer[1],
-                strides=layer[2],
-                activation=None,
-                padding=self.padding,
-                data_format=self.data_format,
-                kernel_initializer=HeUniform(),
-                name=layer_name
-            ))
             
-            # 对conv1d_5层添加额外监控
+            # 对conv1d_5层添加额外监控和处理
             if layer_name == 'conv1d_5':
                 # 输入监控
                 cnn.add(layers.Lambda(
@@ -672,12 +751,13 @@ class DeepSoundBaseRNN:
                         tf.print("conv1d_5输入范围:", tf.reduce_min(x), tf.reduce_max(x),
                                 "是否含NaN:", tf.reduce_any(tf.math.is_nan(x))),
                         tf.debugging.check_numerics(x, "conv1d_5输入包含NaN/无穷大"),
-                        x
+                        # 添加数值范围限制
+                        tf.clip_by_value(x, clip_value_min=-10.0, clip_value_max=10.0)
                     ][2],
                     name='conv1d_5_input_monitor'
                 ))
                 
-                # 重新添加conv1d_5层（因为上面的Lambda层改变了顺序）
+                # 添加conv1d_5层（只添加一次）
                 cnn.add(layers.Conv1D(
                     layer[0],
                     kernel_size=layer[1],
@@ -686,7 +766,7 @@ class DeepSoundBaseRNN:
                     padding=self.padding,
                     data_format=self.data_format,
                     kernel_initializer=HeUniform(),
-                    name='conv1d_5'
+                    name=layer_name
                 ))
                 
                 # 输出监控
@@ -695,11 +775,24 @@ class DeepSoundBaseRNN:
                         tf.print("conv1d_5输出范围:", tf.reduce_min(x), tf.reduce_max(x),
                                 "是否含NaN:", tf.reduce_any(tf.math.is_nan(x))),
                         tf.debugging.check_numerics(x, "conv1d_5输出包含NaN/无穷大"),
-                        x
+                        # 添加数值范围限制
+                        tf.clip_by_value(x, clip_value_min=-10.0, clip_value_max=10.0)
                     ][2],
                     name='conv1d_5_output_monitor'
                 ))
             else:
+                # 其他卷积层正常添加
+                cnn.add(layers.Conv1D(
+                    layer[0],
+                    kernel_size=layer[1],
+                    strides=layer[2],
+                    activation=None,
+                    padding=self.padding,
+                    data_format=self.data_format,
+                    kernel_initializer=HeUniform(),
+                    name=layer_name
+                ))
+                
                 cnn.add(layers.Lambda(
                     lambda x, ln=layer_name: [
                         tf.print(f"{ln}输出范围: ", tf.reduce_min(x), tf.reduce_max(x)),
@@ -742,15 +835,19 @@ class DeepSoundBaseRNN:
         
         ffn.add(layers.Dense(self.output_size, activation=activations.softmax, name='ffn_output'))
 
-        # 核心修改3：修复监控层，确保返回原始张量
+        # 核心修改3：修复监控层，移除assert操作以兼容分布式训练
         model = Sequential([
             layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
-            # 监控输入层 - 修正版
+            # 监控输入层 - 增强版：移除assert操作，保留必要的监控
             layers.Lambda(
                 lambda x: [
-                    tf.print("输入层形状:", tf.shape(x), "输入值范围:", tf.reduce_min(x), tf.reduce_max(x)),
-                    x  # 返回原始张量
-                ][1],  # 取列表中第二个元素（即x）作为输出
+                    tf.print("输入层详细统计: min=", tf.reduce_min(x), "max=", tf.reduce_max(x), 
+                            "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x),
+                            "nan_count=", tf.reduce_sum(tf.cast(tf.math.is_nan(x), tf.int32))),
+                    tf.debugging.assert_all_finite(x, "输入数据包含NaN/无穷大"),
+                    # 移除tf.debugging.assert_less_equal，避免创建Operation对象
+                    x
+                ][2],
                 name='input_monitor'
             ),
             # CNN层及输出监控 - 修正版
@@ -817,6 +914,10 @@ class DeepSoundBaseRNN:
                 self._last_batch = None  # 存储最后一个批次数据
                 
             def train_step(self, data):
+                # 新增：监控学习率（修复分布式环境下的学习率获取方式）
+                current_lr = tf.keras.backend.get_value(self.optimizer.lr)
+                tf.print("当前学习率:", current_lr)
+                
                 # 处理包含样本权重的三元组或普通二元组
                 if len(data) == 3:
                     x, y, sample_weight = data
@@ -861,10 +962,11 @@ class DeepSoundBaseRNN:
         custom_model = CustomModel(model.input, model.output)
         custom_model.resource_logger = self.resource_logger
         
+        # 优化器配置调整：降低学习率并增强梯度裁剪
         custom_model.compile(
             optimizer=Adam(
-                learning_rate=1e-4,
-                clipnorm=1.0,
+                learning_rate=1e-5,  # 降低学习率
+                clipnorm=1.0,        # 增强梯度裁剪
                 clipvalue=0.5
             ),
             loss='sparse_categorical_crossentropy',
@@ -985,12 +1087,12 @@ class DeepSoundBaseRNN:
                         pad_width = ((0, 0), (0, self.input_size - feat_dim))
                         sample = np.pad(sample, pad_width, mode='constant', constant_values=0.0)
                 
-                # 填充窗口数维度（右填-1.0，与y填充位置一致）
+                # 填充窗口数维度（右填-10.0，与y填充位置一致）
                 padded = keras.preprocessing.sequence.pad_sequences(
                     sample.T,
                     maxlen=target_len,
                     padding='post',
-                    value=-1.0,
+                    value=-10.0,  # 关键修改：使用-10作为填充值
                     dtype='float32'
                 ).T
                 X_padded.append(padded)
@@ -1030,21 +1132,19 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"y填充后形状: {y.shape}")
             self.nan_detector.check_nan(y, "y填充后的数据")
 
-            # 处理X的填充值（替换为均值）
-            non_pad_mask = X != -1.0
-            mean_val = 0.0
+            # 处理X的填充值（保留-10作为掩码值，不替换为均值）
+            non_pad_mask = X != -10.0  # 关键修改：识别-10作为填充值
             if np.any(non_pad_mask):
-                mean_val = np.mean(X[non_pad_mask])
-                X[~non_pad_mask] = mean_val
-                self.resource_logger.log(f"X填充值替换为均值: {mean_val:.4f}")
-                self.nan_detector.check_nan(X, "替换填充值后的X")
+                self.resource_logger.log(f"保留填充值-10作为掩码值，不替换为均值")
+                self.nan_detector.check_nan(X, "保留填充值后的X")
             else:
                 self.resource_logger.log("警告：所有值都是填充值，可能数据异常")
 
-            # 特征标准化
+            # 特征标准化 - 确保不影响填充值
             if self.feature_scaling and np.any(non_pad_mask):
                 mean = np.mean(X[non_pad_mask])
                 std = np.std(X[non_pad_mask])
+                # 只标准化非填充值
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 self.resource_logger.log(f"标准化后X统计: min={np.min(X):.4f}, max={np.max(X):.4f}")
                 # 添加更详细的输入数据监控
@@ -1242,12 +1342,12 @@ class DeepSoundBaseRNN:
                     else:
                         sample = np.pad(sample, ((0,0), (0, self.input_size-feat_dim)), mode='constant')
                 
-                # 填充窗口数维度（与训练时一致：右填-1.0）
+                # 填充窗口数维度（与训练时一致：右填-10.0）
                 padded = keras.preprocessing.sequence.pad_sequences(
                     sample.T,
                     maxlen=self.max_seq_len,  # 使用训练时的最大长度
                     padding='post',           # 与训练时一致
-                    value=-1.0,               # 与训练时一致
+                    value=-10.0,              # 关键修改：使用-10作为填充值
                     dtype='float32'
                 ).T
                 X_padded.append(padded)
@@ -1260,10 +1360,9 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"填充后X形状: {X.shape}")
             
             # 标准化（与训练时一致）
-            non_pad_mask = X != -1.0
+            non_pad_mask = X != -10.0  # 关键修改：识别-10作为填充值
             if np.any(non_pad_mask):
-                mean_val = np.mean(X[non_pad_mask])
-                X[~non_pad_mask] = mean_val
+                # 只标准化非填充值
                 mean = np.mean(X[non_pad_mask])
                 std = np.std(X[non_pad_mask])
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
@@ -1391,7 +1490,7 @@ class DeepSoundBaseRNN:
                     sample.T,
                     maxlen=self.max_seq_len,
                     padding='post',
-                    value=-1.0,
+                    value=-10.0,  # 关键修改：使用-10作为填充值
                     dtype='float32'
                 ).T
                 X_padded.append(padded)
@@ -1403,10 +1502,9 @@ class DeepSoundBaseRNN:
             pred_detector.check_nan(X, "预测概率：填充后")
             
             # 标准化
-            non_pad_mask = X != -1.0
+            non_pad_mask = X != -10.0  # 关键修改：识别-10作为填充值
             if np.any(non_pad_mask):
-                mean_val = np.mean(X[non_pad_mask])
-                X[~non_pad_mask] = mean_val
+                # 只标准化非填充值
                 mean = np.mean(X[non_pad_mask])
                 std = np.std(X[non_pad_mask])
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
