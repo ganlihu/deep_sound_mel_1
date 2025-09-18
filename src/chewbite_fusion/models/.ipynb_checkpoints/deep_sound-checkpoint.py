@@ -6,6 +6,7 @@ import tensorflow as tf
 import psutil
 from datetime import datetime
 from typing import List, Tuple, Optional, Union, Dict
+import logging  # 确保导入logging模块
 try:
     import pynvml
     pynvml_available = True
@@ -30,8 +31,11 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import activations
 from tensorflow.keras.initializers import HeUniform
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, Callback
-from chewbite_fusion.data.utils import NaNDetector
+from chewbite_fusion.data.utils import NaNDetector, AudioExtremeDetector  # 导入AudioExtremeDetector
 import traceback
+
+# 初始化日志器
+logger = logging.getLogger(__name__)
 
 
 # 修复：将check_input_data定义为模块级函数，确保全局可访问
@@ -139,6 +143,33 @@ def check_input_data(data, resource_logger, batch_num):
             resource_logger.log(log_extreme)
     
     return tf.debugging.check_numerics(data, "输入数据包含NaN/无穷大")
+
+
+# 新增：conv1d_6输入监控函数
+def monitor_conv1d_6_input(x, resource_logger, batch_num):
+    """监控conv1d_6的输入数据范围，确认是否在±10范围内"""
+    min_val = tf.reduce_min(x)
+    max_val = tf.reduce_max(x)
+    mean_val = tf.reduce_mean(x)
+    std_val = tf.math.reduce_std(x)
+    within_range = tf.reduce_all((x >= -10.0) & (x <= 10.0))
+    
+    # 打印监控信息
+    if tf.executing_eagerly():
+        log_msg = (f"conv1d_6输入监控 - 批次 {batch_num}:\n"
+                   f"  输入最小值: {min_val.numpy():.6f}\n"
+                   f"  输入最大值: {max_val.numpy():.6f}\n"
+                   f"  输入均值: {mean_val.numpy():.6f}\n"
+                   f"  输入标准差: {std_val.numpy():.6f}\n"
+                   f"  是否全部在±10范围内: {within_range.numpy()}\n"
+                   f"  超出范围的元素数量: {tf.reduce_sum(tf.cast((x < -10.0) | (x > 10.0), tf.int32)).numpy()}")
+        resource_logger.log(log_msg)
+    else:
+        tf.print(f"conv1d_6输入监控 - 批次 {batch_num}:",
+                 "min:", min_val, "max:", max_val,
+                 "within ±10:", within_range)
+    
+    return x
 
 
 class ResourceLogger:
@@ -381,6 +412,8 @@ class LayerOutputMonitor(keras.callbacks.Callback):
         )
         self.sample_batch = sample_batch
         self.nan_detector = NaNDetector(verbose=True)
+        # 新增：初始化极端值检测器
+        self.extreme_detector = AudioExtremeDetector()
 
     def _get_all_layer_names(self) -> List[str]:
         all_names: List[str] = []
@@ -402,6 +435,9 @@ class LayerOutputMonitor(keras.callbacks.Callback):
         
         try:
             self.nan_detector.check_nan(self.sample_batch, f"Epoch {epoch} 监控批次输入")
+            # 新增：使用极端值检测器检查样本批次
+            self.extreme_detector.check_extreme(self.sample_batch, f"Epoch {epoch} 监控批次输入")
+            
             layer_outputs = self.feature_extractor.predict(self.sample_batch, verbose=0)
             
             for name, output in zip(self.valid_layers, layer_outputs):
@@ -409,10 +445,14 @@ class LayerOutputMonitor(keras.callbacks.Callback):
                 self.resource_logger.log(f"形状: {output.shape}")
                 self.nan_detector.check_nan(output, f"Epoch {epoch} 层 {name} 输出")
                 
+                # 新增：使用极端值检测器检查层输出
+                self.extreme_detector.check_extreme(output, f"Epoch {epoch} 层 {name} 输出")
+                
                 if np.isnan(output).any():
                     self.resource_logger.log("存在NaN值！")
                 else:
                     self.resource_logger.log(f"最小值: {np.min(output):.6f}, 最大值: {np.max(output):.6f}")
+                    self.resource_logger.log(f"均值: {np.mean(output):.6f}, 标准差: {np.std(output):.6f}")  # 新增统计信息
                 self.resource_logger.log(f"含Inf: {np.isinf(output).any()}")
                 self.resource_logger.log("=========================================\n")
         except Exception as e:
@@ -438,6 +478,8 @@ class GradientMonitor(keras.callbacks.Callback):
         self.x_batch, self.y_batch = sample_batch
         # 确保监控批次适配分布式训练
         self.dist_dataset = self._prepare_distributed_dataset()
+        # 新增：初始化极端值检测器
+        self.extreme_detector = AudioExtremeDetector()
 
     def _prepare_distributed_dataset(self) -> tf.data.Dataset:
         """将监控数据转换为分布式数据集"""
@@ -483,6 +525,14 @@ class GradientMonitor(keras.callbacks.Callback):
                         if np.isinf(g_np).any():
                             has_inf = True
                 
+                # 新增：梯度统计信息
+                if grad_norms:
+                    self.resource_logger.log(f"Epoch {epoch} 梯度统计: "
+                                           f"最小值={np.min(grad_norms):.6f}, "
+                                           f"最大值={np.max(grad_norms):.6f}, "
+                                           f"均值={np.mean(grad_norms):.6f}, "
+                                           f"标准差={np.std(grad_norms):.6f}")
+                
                 if has_nan:
                     self.resource_logger.log(f"Epoch {epoch} 梯度包含NaN!")
                 if has_inf:
@@ -510,6 +560,10 @@ class BatchOutputMonitor(keras.callbacks.Callback):
             self.resource_logger.log(f"\n===== 批次 {batch} 训练状态 =====")
             self.resource_logger.log(f"损失值: {logs.get('loss', '未知')}")
             self.resource_logger.log(f"准确率: {logs.get('accuracy', '未知')}")
+            # 新增：学习率监控
+            if hasattr(self.model.optimizer, 'lr'):
+                lr = tf.keras.backend.get_value(self.model.optimizer.lr)
+                self.resource_logger.log(f"当前学习率: {lr:.8f}")
             self.resource_logger.log("===========================")
 
 
@@ -533,35 +587,68 @@ class Conv1DWeightMonitor(Callback):
                                 return found
                     return None
                 
+                # 检查conv1d_5
                 conv1d_5 = find_layer(self.model, 'conv1d_5')
                 if conv1d_5 is None:
                     self.resource_logger.log(f"conv1d_5权重监控 - 批次 {batch}: 未找到conv1d_5层")
-                    return
+                else:
+                    kernel = conv1d_5.kernel
+                    bias = conv1d_5.bias
                     
-                kernel = conv1d_5.kernel
-                bias = conv1d_5.bias
+                    # 记录权重范围（修复：兼容计算图模式）
+                    def get_val(tensor):
+                        return tensor.numpy() if tf.executing_eagerly() else "无法获取"
+                    
+                    kernel_min = get_val(tf.reduce_min(kernel))
+                    kernel_max = get_val(tf.reduce_max(kernel))
+                    kernel_mean = get_val(tf.reduce_mean(kernel))  # 新增：均值
+                    kernel_std = get_val(tf.math.reduce_std(kernel))  # 新增：标准差
+                    
+                    bias_min = get_val(tf.reduce_min(bias))
+                    bias_max = get_val(tf.reduce_max(bias))
+                    bias_mean = get_val(tf.reduce_mean(bias))  # 新增：均值
+                    bias_std = get_val(tf.math.reduce_std(bias))  # 新增：标准差
+                    
+                    # 检查是否有NaN
+                    has_nan_kernel = get_val(tf.reduce_any(tf.math.is_nan(kernel)))
+                    has_nan_bias = get_val(tf.reduce_any(tf.math.is_nan(bias)))
+                    
+                    self.resource_logger.log(
+                        f"conv1d_5 权重监控 - 批次 {batch}:\n"
+                        f"  权重范围: [{kernel_min:.6f}, {kernel_max:.6f}], 均值: {kernel_mean:.6f}, 标准差: {kernel_std:.6f}\n"
+                        f"  偏置范围: [{bias_min:.6f}, {bias_max:.6f}], 均值: {bias_mean:.6f}, 标准差: {bias_std:.6f}\n"
+                        f"  权重含NaN: {has_nan_kernel}, 偏置含NaN: {has_nan_bias}"
+                    )
                 
-                # 记录权重范围（修复：兼容计算图模式）
-                def get_val(tensor):
-                    return tensor.numpy() if tf.executing_eagerly() else "无法获取"
-                
-                kernel_min = get_val(tf.reduce_min(kernel))
-                kernel_max = get_val(tf.reduce_max(kernel))
-                bias_min = get_val(tf.reduce_min(bias))
-                bias_max = get_val(tf.reduce_max(bias))
-                
-                # 检查是否有NaN
-                has_nan_kernel = get_val(tf.reduce_any(tf.math.is_nan(kernel)))
-                has_nan_bias = get_val(tf.reduce_any(tf.math.is_nan(bias)))
-                
-                self.resource_logger.log(
-                    f"conv1d_5 权重监控 - 批次 {batch}:\n"
-                    f"  权重范围: [{kernel_min:.6f}, {kernel_max:.6f}]\n"
-                    f"  偏置范围: [{bias_min:.6f}, {bias_max:.6f}]\n"
-                    f"  权重含NaN: {has_nan_kernel}, 偏置含NaN: {has_nan_bias}"
-                )
+                # 新增：检查conv1d_6权重
+                conv1d_6 = find_layer(self.model, 'conv1d_6')
+                if conv1d_6 is None:
+                    self.resource_logger.log(f"conv1d_6权重监控 - 批次 {batch}: 未找到conv1d_6层")
+                else:
+                    kernel = conv1d_6.kernel
+                    bias = conv1d_6.bias
+                    
+                    kernel_min = get_val(tf.reduce_min(kernel))
+                    kernel_max = get_val(tf.reduce_max(kernel))
+                    kernel_mean = get_val(tf.reduce_mean(kernel))
+                    kernel_std = get_val(tf.math.reduce_std(kernel))
+                    
+                    bias_min = get_val(tf.reduce_min(bias))
+                    bias_max = get_val(tf.reduce_max(bias))
+                    bias_mean = get_val(tf.reduce_mean(bias))
+                    bias_std = get_val(tf.math.reduce_std(bias))
+                    
+                    has_nan_kernel = get_val(tf.reduce_any(tf.math.is_nan(kernel)))
+                    has_nan_bias = get_val(tf.reduce_any(tf.math.is_nan(bias)))
+                    
+                    self.resource_logger.log(
+                        f"conv1d_6 权重监控 - 批次 {batch}:\n"
+                        f"  权重范围: [{kernel_min:.6f}, {kernel_max:.6f}], 均值: {kernel_mean:.6f}, 标准差: {kernel_std:.6f}\n"
+                        f"  偏置范围: [{bias_min:.6f}, {bias_max:.6f}], 均值: {bias_mean:.6f}, 标准差: {bias_std:.6f}\n"
+                        f"  权重含NaN: {has_nan_kernel}, 偏置含NaN: {has_nan_bias}"
+                    )
             except Exception as e:
-                self.resource_logger.log(f"conv1d_5权重监控出错: {str(e)}")
+                self.resource_logger.log(f"卷积层权重监控出错: {str(e)}")
 
 
 # 新增：监控conv1d_5梯度的回调
@@ -595,7 +682,7 @@ class Conv1DGradientMonitor(Callback):
                     y_pred = self.model(x_batch, training=True)
                     loss = self.loss_fn(y_batch, y_pred, sample_weight=sample_weight)
                 
-                # 查找conv1d_5层
+                # 查找卷积层
                 def find_layer(model, name):
                     for layer in model.layers:
                         if layer.name == name:
@@ -606,32 +693,44 @@ class Conv1DGradientMonitor(Callback):
                                 return found
                     return None
                 
+                # 检查conv1d_5梯度
                 conv1d_5 = find_layer(self.model, 'conv1d_5')
                 if conv1d_5 is None:
                     self.resource_logger.log(f"conv1d_5梯度监控 - 批次 {batch}: 未找到conv1d_5层")
-                    return
+                else:
+                    grads_5 = tape.gradient(loss, conv1d_5.trainable_weights)
+                    self._log_gradient_info(grads_5, conv1d_5.trainable_weights, batch, "conv1d_5")
                 
-                # 获取conv1d_5的梯度
-                grads = tape.gradient(loss, conv1d_5.trainable_weights)
-                
-                # 分析梯度（修复：兼容计算图模式）
-                def get_val(tensor):
-                    return tensor.numpy() if tf.executing_eagerly() else "无法获取"
-                
-                for grad, var in zip(grads, conv1d_5.trainable_weights):
-                    if grad is not None:
-                        grad_min = get_val(tf.reduce_min(grad))
-                        grad_max = get_val(tf.reduce_max(grad))
-                        has_nan = get_val(tf.reduce_any(tf.math.is_nan(grad)))
-                        has_inf = get_val(tf.reduce_any(tf.math.is_inf(grad)))
-                        
-                        self.resource_logger.log(
-                            f"conv1d_5 梯度监控 - 批次 {batch} - {var.name}:\n"
-                            f"  梯度范围: [{grad_min:.6f}, {grad_max:.6f}]\n"
-                            f"  含NaN: {has_nan}, 含Inf: {has_inf}"
-                        )
+                # 新增：检查conv1d_6梯度
+                conv1d_6 = find_layer(self.model, 'conv1d_6')
+                if conv1d_6 is None:
+                    self.resource_logger.log(f"conv1d_6梯度监控 - 批次 {batch}: 未找到conv1d_6层")
+                else:
+                    grads_6 = tape.gradient(loss, conv1d_6.trainable_weights)
+                    self._log_gradient_info(grads_6, conv1d_6.trainable_weights, batch, "conv1d_6")
+                    
             except Exception as e:
-                self.resource_logger.log(f"conv1d_5梯度监控出错: {str(e)}")
+                self.resource_logger.log(f"卷积层梯度监控出错: {str(e)}")
+    
+    def _log_gradient_info(self, grads, vars, batch, layer_name):
+        """辅助函数：记录梯度信息"""
+        def get_val(tensor):
+            return tensor.numpy() if tf.executing_eagerly() else "无法获取"
+        
+        for grad, var in zip(grads, vars):
+            if grad is not None:
+                grad_min = get_val(tf.reduce_min(grad))
+                grad_max = get_val(tf.reduce_max(grad))
+                grad_mean = get_val(tf.reduce_mean(grad))
+                grad_std = get_val(tf.math.reduce_std(grad))
+                has_nan = get_val(tf.reduce_any(tf.math.is_nan(grad)))
+                has_inf = get_val(tf.reduce_any(tf.math.is_inf(grad)))
+                
+                self.resource_logger.log(
+                    f"{layer_name} 梯度监控 - 批次 {batch} - {var.name}:\n"
+                    f"  梯度范围: [{grad_min:.6f}, {grad_max:.6f}], 均值: {grad_mean:.6f}, 标准差: {grad_std:.6f}\n"
+                    f"  含NaN: {has_nan}, 含Inf: {has_inf}"
+                )
 
 
 class DeepSoundBaseRNN:
@@ -664,6 +763,10 @@ class DeepSoundBaseRNN:
         self.resource_logger = ResourceLogger()
         os.makedirs(self.model_save_path, exist_ok=True)
         self.last_batch = None  # 用于存储最后一个批次的数据，供梯度监控使用
+        # 新增：初始化极端值检测器
+        self.extreme_detector = AudioExtremeDetector()
+        # 新增：批次计数器，用于监控
+        self.batch_counter = tf.Variable(0, trainable=False, dtype=tf.int64)
 
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
         """构建模型结构，优化维度转换和正则化（减少显存占用）"""
@@ -749,6 +852,7 @@ class DeepSoundBaseRNN:
                 cnn.add(layers.Lambda(
                     lambda x: [
                         tf.print("conv1d_5输入范围:", tf.reduce_min(x), tf.reduce_max(x),
+                                "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x),
                                 "是否含NaN:", tf.reduce_any(tf.math.is_nan(x))),
                         tf.debugging.check_numerics(x, "conv1d_5输入包含NaN/无穷大"),
                         # 添加数值范围限制
@@ -773,6 +877,7 @@ class DeepSoundBaseRNN:
                 cnn.add(layers.Lambda(
                     lambda x: [
                         tf.print("conv1d_5输出范围:", tf.reduce_min(x), tf.reduce_max(x),
+                                "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x),
                                 "是否含NaN:", tf.reduce_any(tf.math.is_nan(x))),
                         tf.debugging.check_numerics(x, "conv1d_5输出包含NaN/无穷大"),
                         # 添加数值范围限制
@@ -816,6 +921,50 @@ class DeepSoundBaseRNN:
             # 除最后一层外添加Dropout
             if ix_l < (len(layers_config) - 1):
                 cnn.add(layers.Dropout(rate=0.3, name=f'dropout_{ix_l + 1}'))
+        
+        # 新增：在conv1d_6之前添加输入监控
+        cnn.add(layers.Lambda(
+            lambda x: monitor_conv1d_6_input(x, self.resource_logger, self.batch_counter),
+            name='conv1d_6_input_monitor'
+        ))
+        
+        # 新增：添加conv1d_6层定义（显式指定）
+        cnn.add(layers.Conv1D(
+            32,  # 与前一层保持一致的卷积核数量
+            kernel_size=3,
+            strides=1,
+            activation=None,
+            padding=self.padding,
+            data_format=self.data_format,
+            kernel_initializer=HeUniform(),  # 显式指定初始化器
+            name='conv1d_6'
+        ))
+        
+        # 新增：conv1d_6输出监控
+        cnn.add(layers.Lambda(
+            lambda x: [
+                tf.print("conv1d_6输出范围:", tf.reduce_min(x), tf.reduce_max(x),
+                        "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x),
+                        "是否含NaN:", tf.reduce_any(tf.math.is_nan(x))),
+                tf.debugging.check_numerics(x, "conv1d_6输出包含NaN/无穷大"),
+                x
+            ][2],
+            name='conv1d_6_output_monitor'
+        ))
+        
+        # 新增：检查conv1d_6的卷积核初始化
+        self.log_conv1d_6_kernel_init(cnn.get_layer('conv1d_6'))
+
+        cnn.add(layers.BatchNormalization(name='bn_6'))
+        cnn.add(layers.Lambda(
+            lambda x: [
+                tf.print("bn_6输出范围: ", tf.reduce_min(x), tf.reduce_max(x)),
+                tf.debugging.check_numerics(x, "bn_6包含NaN/无穷大"),
+                x
+            ][2],
+            name='bn_6_monitor'
+        ))
+        cnn.add(layers.Activation(activations.relu, name='act_6'))
 
         cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
         cnn.add(layers.Flatten(name='flatten'))
@@ -840,32 +989,37 @@ class DeepSoundBaseRNN:
             layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
             # 监控输入层 - 增强版：移除assert操作，保留必要的监控
             layers.Lambda(
-                lambda x: [
-                    tf.print("输入层详细统计: min=", tf.reduce_min(x), "max=", tf.reduce_max(x), 
+                lambda x, batch_num: [
+                    tf.print("输入层详细统计 - 批次号:", batch_num, 
+                            "min=", tf.reduce_min(x), "max=", tf.reduce_max(x), 
                             "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x),
                             "nan_count=", tf.reduce_sum(tf.cast(tf.math.is_nan(x), tf.int32))),
                     tf.debugging.assert_all_finite(x, "输入数据包含NaN/无穷大"),
-                    # 移除tf.debugging.assert_less_equal，避免创建Operation对象
                     x
                 ][2],
-                name='input_monitor'
+                name='model_input_trace',
+                arguments={'batch_num': tf.Variable(0, trainable=False, dtype=tf.int64)}  # 添加批次号变量
             ),
             # CNN层及输出监控 - 修正版
             layers.TimeDistributed(cnn, name='time_distributed_cnn'),
             layers.Lambda(
                 lambda x: [
                     tf.print("CNN输出形状:", tf.shape(x)),
+                    tf.print("CNN输出统计: min=", tf.reduce_min(x), "max=", tf.reduce_max(x), 
+                            "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x)),
                     tf.debugging.check_numerics(x, "CNN输出包含NaN/无穷大"),
                     x  # 返回原始张量
-                ][2],  # 取列表中第三个元素（即x）作为输出
+                ][3],  # 取列表中第四个元素（即x）作为输出
                 name='cnn_output_monitor'
             ),
             # GRU层及输入监控 - 修正版
             layers.Lambda(
                 lambda x: [
                     tf.print("GRU输入形状:", tf.shape(x)),
+                    tf.print("GRU输入统计: min=", tf.reduce_min(x), "max=", tf.reduce_max(x), 
+                            "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x)),
                     x  # 返回原始张量
-                ][1],  # 取列表中第二个元素（即x）作为输出
+                ][2],  # 取列表中第三个元素（即x）作为输出
                 name='gru_input_monitor'
             ),
             layers.Bidirectional(
@@ -881,17 +1035,21 @@ class DeepSoundBaseRNN:
             layers.Lambda(
                 lambda x: [
                     tf.print("GRU输出形状:", tf.shape(x)),
+                    tf.print("GRU输出统计: min=", tf.reduce_min(x), "max=", tf.reduce_max(x), 
+                            "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x)),
                     tf.debugging.check_numerics(x, "GRU输出包含NaN/无穷大"),
                     x  # 返回原始张量
-                ][2],  # 取列表中第三个元素（即x）作为输出
+                ][3],  # 取列表中第四个元素（即x）作为输出
                 name='gru_output_monitor'
             ),
             # FFN层及输入监控 - 修正版
             layers.Lambda(
                 lambda x: [
                     tf.print("FFN输入形状:", tf.shape(x)),
+                    tf.print("FFN输入统计: min=", tf.reduce_min(x), "max=", tf.reduce_max(x), 
+                            "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x)),
                     x  # 返回原始张量
-                ][1],  # 取列表中第二个元素（即x）作为输出
+                ][2],  # 取列表中第三个元素（即x）作为输出
                 name='ffn_input_monitor'
             ),
             layers.TimeDistributed(ffn, name='time_distributed_ffn'),
@@ -899,9 +1057,11 @@ class DeepSoundBaseRNN:
             layers.Lambda(
                 lambda x: [
                     tf.print("FFN输出形状:", tf.shape(x)),
+                    tf.print("FFN输出统计: min=", tf.reduce_min(x), "max=", tf.reduce_max(x), 
+                            "mean=", tf.reduce_mean(x), "std=", tf.math.reduce_std(x)),
                     tf.debugging.check_numerics(x, "FFN输出包含NaN/无穷大"),
                     x  # 返回原始张量
-                ][2],  # 取列表中第三个元素（即x）作为输出
+                ][3],  # 取列表中第四个元素（即x）作为输出
                 name='ffn_output_monitor'
             )
         ])
@@ -930,11 +1090,34 @@ class DeepSoundBaseRNN:
                 
                 # 获取批次号（使用numpy值避免Tensor格式化问题）
                 train_counter = self._train_counter.numpy() if tf.executing_eagerly() else "graph_mode"
+                
+                # 更新全局批次计数器
+                self.resource_logger.batch_counter.assign_add(1)
+                
+                # 新增：记录输入数据的统计信息
+                if tf.executing_eagerly():
+                    x_np = x.numpy()
+                    self.resource_logger.log(
+                        f"批次 {train_counter} 输入数据统计: "
+                        f"min={np.min(x_np):.6f}, max={np.max(x_np):.6f}, "
+                        f"mean={np.mean(x_np):.6f}, std={np.std(x_np):.6f}"
+                    )
+                
                 x = check_input_data(x, self.resource_logger, train_counter)
                 
                 # 前向传播
                 with tf.GradientTape() as tape:
                     y_pred = self(x, training=True)
+                    
+                    # 新增：记录预测输出的统计信息
+                    if tf.executing_eagerly():
+                        y_pred_np = y_pred.numpy()
+                        self.resource_logger.log(
+                            f"批次 {train_counter} 预测输出统计: "
+                            f"min={np.min(y_pred_np):.6f}, max={np.max(y_pred_np):.6f}, "
+                            f"mean={np.mean(y_pred_np):.6f}, std={np.std(y_pred_np):.6f}"
+                        )
+                    
                     # 计算损失时传入样本权重
                     loss = self.compiled_loss(
                         y, y_pred,
@@ -944,6 +1127,17 @@ class DeepSoundBaseRNN:
                 
                 # 计算梯度并更新权重
                 gradients = tape.gradient(loss, self.trainable_variables)
+                
+                # 新增：记录梯度的统计信息
+                if tf.executing_eagerly() and gradients:
+                    grad_norms = [tf.norm(g).numpy() for g in gradients if g is not None]
+                    if grad_norms:
+                        self.resource_logger.log(
+                            f"批次 {train_counter} 梯度统计: "
+                            f"min={np.min(grad_norms):.6f}, max={np.max(grad_norms):.6f}, "
+                            f"mean={np.mean(grad_norms):.6f}, std={np.std(grad_norms):.6f}"
+                        )
+                
                 self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
                 
                 # 更新指标（传入样本权重）
@@ -974,6 +1168,31 @@ class DeepSoundBaseRNN:
         )
 
         return custom_model
+    
+    # 新增：记录conv1d_6卷积核初始化信息
+    def log_conv1d_6_kernel_init(self, conv1d_6_layer):
+        """记录conv1d_6的卷积核初始化信息"""
+        try:
+            kernel = conv1d_6_layer.kernel.numpy()
+            bias = conv1d_6_layer.bias.numpy() if conv1d_6_layer.use_bias else None
+            
+            log_msg = [f"conv1d_6卷积核初始化检查:"]
+            log_msg.append(f"  形状: {kernel.shape}")
+            log_msg.append(f"  权重最小值: {kernel.min():.6f}")
+            log_msg.append(f"  权重最大值: {kernel.max():.6f}")
+            log_msg.append(f"  权重均值: {kernel.mean():.6f}")
+            log_msg.append(f"  权重标准差: {kernel.std():.6f}")
+            
+            if bias is not None:
+                log_msg.append(f"  偏置最小值: {bias.min():.6f}")
+                log_msg.append(f"  偏置最大值: {bias.max():.6f}")
+                log_msg.append(f"  偏置均值: {bias.mean():.6f}")
+                log_msg.append(f"  偏置标准差: {bias.std():.6f}")
+            
+            log_msg.append(f"  初始化器类型: {conv1d_6_layer.kernel_initializer.__class__.__name__}")
+            self.resource_logger.log("\n".join(log_msg))
+        except Exception as e:
+            self.resource_logger.log(f"记录conv1d_6卷积核初始化信息失败: {str(e)}")
 
     def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray]) -> None:
         """训练模型"""
@@ -994,6 +1213,13 @@ class DeepSoundBaseRNN:
             # 检查NaN
             self.nan_detector.check_nan(X, "原始X数据")
             
+            # 新增：使用极端值检测器检查原始数据
+            if isinstance(X, np.ndarray):
+                self.extreme_detector.check_extreme(X, "原始X数据")
+            elif isinstance(X, list) and all(isinstance(x, np.ndarray) for x in X):
+                for i, sample in enumerate(X[:5]):  # 检查前5个样本
+                    self.extreme_detector.check_extreme(sample, f"原始X数据样本{i}")
+            
             # 转换为NumPy数组
             self.resource_logger.log("\n===== 转换样本为NumPy数组 =====")
             X_array: List[np.ndarray] = []
@@ -1004,14 +1230,24 @@ class DeepSoundBaseRNN:
                         sample_array = np.array(sample, dtype='float32')
                         X_array.append(sample_array)
                         self.original_lengths.append(len(sample_array))  # 记录原始长度
-                        self.resource_logger.log(f"样本{i}：已从list转换为数组，形状={sample_array.shape}，原始长度={len(sample_array)}")
+                        # 新增：记录每个样本的统计信息
+                        self.resource_logger.log(
+                            f"样本{i}：已从list转换为数组，形状={sample_array.shape}，原始长度={len(sample_array)}, "
+                            f"min={np.min(sample_array):.6f}, max={np.max(sample_array):.6f}, "
+                            f"mean={np.mean(sample_array):.6f}, std={np.std(sample_array):.6f}"
+                        )
                     except ValueError as e:
                         self.resource_logger.log(f"样本{i}：列表转换为数组失败！错误：{e}")
                         raise
                 elif isinstance(sample, np.ndarray):
                     X_array.append(sample)
                     self.original_lengths.append(len(sample))  # 记录原始长度
-                    self.resource_logger.log(f"样本{i}：已是数组，形状={sample.shape}，原始长度={len(sample)}")
+                    # 新增：记录每个样本的统计信息
+                    self.resource_logger.log(
+                        f"样本{i}：已是数组，形状={sample.shape}，原始长度={len(sample)}, "
+                        f"min={np.min(sample):.6f}, max={np.max(sample):.6f}, "
+                        f"mean={np.mean(sample):.6f}, std={np.std(sample):.6f}"
+                    )
                 else:
                     raise TypeError(f"样本{i}：既不是list也不是数组，类型={type(sample)}")
             X = X_array
@@ -1026,6 +1262,15 @@ class DeepSoundBaseRNN:
                 for sample in X
             ]
             self.nan_detector.check_nan(X, "统一维度后的X")
+            
+            # 新增：统一维度后的统计信息
+            for i, sample in enumerate(X[:5]):  # 检查前5个样本
+                if isinstance(sample, np.ndarray):
+                    self.resource_logger.log(
+                        f"样本{i}统一维度后：形状={sample.shape}, "
+                        f"min={np.min(sample):.6f}, max={np.max(sample):.6f}, "
+                        f"mean={np.mean(sample):.6f}, std={np.std(sample):.6f}"
+                    )
             
             # 计算最大序列长度
             if isinstance(X, (list, np.ndarray)):
@@ -1059,7 +1304,13 @@ class DeepSoundBaseRNN:
                     raise ValueError(
                         f"样本{i}的X与y长度不匹配: X长度={x_len}, y长度={y_len}"
                     )
-                self.resource_logger.log(f"样本{i}标签：形状={y_array[i].shape}，类别范围=[{y_array[i].min()}, {y_array[i].max()}]")
+                # 新增：标签统计信息
+                unique_labels, counts = np.unique(y_array[i], return_counts=True)
+                label_distribution = {k: v for k, v in zip(unique_labels, counts)}
+                self.resource_logger.log(
+                    f"样本{i}标签：形状={y_array[i].shape}, 类别范围=[{y_array[i].min()}, {y_array[i].max()}], "
+                    f"分布={label_distribution}"
+                )
                 
                 # 检查标签是否超出输出维度范围
                 if y_array[i].max() >= self.output_size:
@@ -1107,12 +1358,25 @@ class DeepSoundBaseRNN:
                     self.resource_logger.log(f"样本{i}: {p.shape}")
                 raise
             
+            # 新增：填充后的统计信息
+            self.resource_logger.log(
+                f"X填充后统计: 形状={X.shape}, "
+                f"min={np.min(X):.6f}, max={np.max(X):.6f}, "
+                f"mean={np.mean(X):.6f}, std={np.std(X):.6f}"
+            )
             self.nan_detector.check_nan(X, "X填充后的数组")
             
             # 添加通道维度
             if X.ndim == 3:
                 X = np.expand_dims(X, axis=-1)
             self.resource_logger.log(f"X填充后形状: {X.shape}")
+            
+            # 新增：添加通道维度后的统计信息
+            self.resource_logger.log(
+                f"添加通道维度后统计: 形状={X.shape}, "
+                f"min={np.min(X):.6f}, max={np.max(X):.6f}, "
+                f"mean={np.mean(X):.6f}, std={np.std(X):.6f}"
+            )
             self.nan_detector.check_nan(X, "添加通道维度后的X")
 
             # 处理标签和填充类别
@@ -1135,6 +1399,13 @@ class DeepSoundBaseRNN:
             # 处理X的填充值（保留-10作为掩码值，不替换为均值）
             non_pad_mask = X != -10.0  # 关键修改：识别-10作为填充值
             if np.any(non_pad_mask):
+                # 新增：非填充区域的统计信息
+                non_pad_data = X[non_pad_mask]
+                self.resource_logger.log(
+                    f"非填充区域统计: 数量={len(non_pad_data)}, "
+                    f"min={np.min(non_pad_data):.6f}, max={np.max(non_pad_data):.6f}, "
+                    f"mean={np.mean(non_pad_data):.6f}, std={np.std(non_pad_data):.6f}"
+                )
                 self.resource_logger.log(f"保留填充值-10作为掩码值，不替换为均值")
                 self.nan_detector.check_nan(X, "保留填充值后的X")
             else:
@@ -1142,15 +1413,47 @@ class DeepSoundBaseRNN:
 
             # 特征标准化 - 确保不影响填充值
             if self.feature_scaling and np.any(non_pad_mask):
-                mean = np.mean(X[non_pad_mask])
-                std = np.std(X[non_pad_mask])
+                # 新增：标准化前的统计信息
+                pre_norm_data = X[non_pad_mask]
+                pre_norm_stats = {
+                    'min': np.min(pre_norm_data),
+                    'max': np.max(pre_norm_data),
+                    'mean': np.mean(pre_norm_data),
+                    'std': np.std(pre_norm_data)
+                }
+                self.resource_logger.log(
+                    f"标准化前非填充数据统计: "
+                    f"min={pre_norm_stats['min']:.6f}, max={pre_norm_stats['max']:.6f}, "
+                    f"mean={pre_norm_stats['mean']:.6f}, std={pre_norm_stats['std']:.6f}"
+                )
+                
+                mean = pre_norm_stats['mean']
+                std = pre_norm_stats['std']
                 # 只标准化非填充值
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
+                
+                # 新增：标准化后的统计信息
+                post_norm_data = X[non_pad_mask]
+                post_norm_stats = {
+                    'min': np.min(post_norm_data),
+                    'max': np.max(post_norm_data),
+                    'mean': np.mean(post_norm_data),
+                    'std': np.std(post_norm_data)
+                }
+                self.resource_logger.log(
+                    f"标准化后非填充数据统计: "
+                    f"min={post_norm_stats['min']:.6f}, max={post_norm_stats['max']:.6f}, "
+                    f"mean={post_norm_stats['mean']:.6f}, std={post_norm_stats['std']:.6f}"
+                )
+                
                 self.resource_logger.log(f"标准化后X统计: min={np.min(X):.4f}, max={np.max(X):.4f}")
                 # 添加更详细的输入数据监控
                 self.resource_logger.log(f"标准化后X极端值: 最小={np.min(X):.6f}, 最大={np.max(X):.6f}, 均值={np.mean(X):.6f}, 标准差={np.std(X):.6f}")
                 self.resource_logger.log(f"标准化后X是否含Inf: {np.isinf(X).any()}, 位置: {np.where(np.isinf(X))}")
                 self.nan_detector.check_nan(X, "标准化后的X")
+                
+                # 新增：使用极端值检测器检查标准化后的数据
+                self.extreme_detector.check_extreme(X, "标准化后的X数据")
 
             # 确定输出维度
             output_size = len(self.classes_) + 1 if self.classes_ else self.output_size  # 使用初始化的output_size
@@ -1173,6 +1476,14 @@ class DeepSoundBaseRNN:
             monitor_y = y[:monitor_batch_size]
             monitor_batch = (monitor_x, monitor_y)
             self.resource_logger.log(f"监控批次形状 - X: {monitor_x.shape}, y: {monitor_y.shape}")
+            
+            # 新增：监控批次的统计信息
+            self.resource_logger.log(
+                f"监控批次X统计: "
+                f"min={np.min(monitor_x):.6f}, max={np.max(monitor_x):.6f}, "
+                f"mean={np.mean(monitor_x):.6f}, std={np.std(monitor_x):.6f}"
+            )
+            
             self.nan_detector.check_nan(monitor_x, "监控批次X数据")
             self.nan_detector.check_nan(monitor_y, "监控批次y数据")
 
@@ -1214,7 +1525,7 @@ class DeepSoundBaseRNN:
                 ),
                 GPUUsageMonitor(interval=10, resource_logger=self.resource_logger),
                 BatchOutputMonitor(resource_logger=self.resource_logger),  # 添加批次监控回调
-                Conv1DWeightMonitor(resource_logger=self.resource_logger)  # 新增：conv1d_5权重监控
+                Conv1DWeightMonitor(resource_logger=self.resource_logger)  # 新增：conv1d_5和conv1d_6权重监控
             ]
             
             # 只有在单GPU训练时添加梯度监控（分布式训练需要特殊处理）
@@ -1232,7 +1543,12 @@ class DeepSoundBaseRNN:
             if self.set_sample_weights and y.size > 0:
                 sample_weights = self._get_samples_weights(y)
                 sample_weights = np.clip(sample_weights, 0.0, 10.0)
-                self.resource_logger.log(f"样本权重范围: [{np.min(sample_weights):.4f}, {np.max(sample_weights):.4f}]")
+                # 新增：样本权重的统计信息
+                self.resource_logger.log(
+                    f"样本权重统计: 形状={sample_weights.shape}, "
+                    f"min={np.min(sample_weights):.6f}, max={np.max(sample_weights):.6f}, "
+                    f"mean={np.mean(sample_weights):.6f}, std={np.std(sample_weights):.6f}"
+                )
                 self.nan_detector.check_nan(sample_weights, "样本权重")
 
             # 开始训练
@@ -1288,6 +1604,8 @@ class DeepSoundBaseRNN:
                 raise RuntimeError("请先调用fit方法训练模型")
             
             pred_detector = NaNDetector(verbose=True)
+            # 新增：初始化预测用极端值检测器
+            pred_extreme_detector = AudioExtremeDetector()
             self.resource_logger.log("\n===== 开始预测 =====")
             
             # 提取嵌套样本
@@ -1304,14 +1622,28 @@ class DeepSoundBaseRNN:
                         sample_array = np.array(sample, dtype='float32')
                         X_array.append(sample_array)
                         pred_original_lengths.append(sample_array.shape[0])  # 记录原始长度
-                        self.resource_logger.log(f"预测样本{i}：已从list转换为数组，形状={sample_array.shape}，原始长度={sample_array.shape[0]}")
+                        # 新增：预测样本的统计信息
+                        self.resource_logger.log(
+                            f"预测样本{i}：已从list转换为数组，形状={sample_array.shape}，原始长度={sample_array.shape[0]}, "
+                            f"min={np.min(sample_array):.6f}, max={np.max(sample_array):.6f}, "
+                            f"mean={np.mean(sample_array):.6f}, std={np.std(sample_array):.6f}"
+                        )
+                        # 新增：检查极端值
+                        pred_extreme_detector.check_extreme(sample_array, f"预测样本{i}原始数据")
                     except ValueError as e:
                         self.resource_logger.log(f"预测样本{i}：转换失败！错误：{e}")
                         raise
                 elif isinstance(sample, np.ndarray):
                     X_array.append(sample)
                     pred_original_lengths.append(sample.shape[0])  # 记录原始长度
-                    self.resource_logger.log(f"预测样本{i}：已是数组，形状={sample.shape}，原始长度={sample.shape[0]}")
+                    # 新增：预测样本的统计信息
+                    self.resource_logger.log(
+                        f"预测样本{i}：已是数组，形状={sample.shape}，原始长度={sample.shape[0]}, "
+                        f"min={np.min(sample):.6f}, max={np.max(sample):.6f}, "
+                        f"mean={np.mean(sample):.6f}, std={np.std(sample):.6f}"
+                    )
+                    # 新增：检查极端值
+                    pred_extreme_detector.check_extreme(sample, f"预测样本{i}原始数据")
                 else:
                     raise TypeError(f"预测样本{i}：类型错误={type(sample)}")
             X = X_array
@@ -1326,6 +1658,16 @@ class DeepSoundBaseRNN:
                 for sample in X
             ]
             pred_detector.check_nan(X, "预测：统一维度后")
+            
+            # 新增：统一维度后的统计信息
+            for i, sample in enumerate(X[:5]):
+                if isinstance(sample, np.ndarray):
+                    self.resource_logger.log(
+                        f"预测样本{i}统一维度后：形状={sample.shape}, "
+                        f"min={np.min(sample):.6f}, max={np.max(sample):.6f}, "
+                        f"mean={np.mean(sample):.6f}, std={np.std(sample):.6f}"
+                    )
+            
             self.resource_logger.log(f"统一维度后样本形状列表: {[s.shape for s in X]}")
             
             # 填充到训练时的最大序列长度
@@ -1356,23 +1698,68 @@ class DeepSoundBaseRNN:
             X = np.array(X_padded, dtype='float32')
             if X.ndim == 3:
                 X = np.expand_dims(X, axis=-1)
+            
+            # 新增：填充后的统计信息
+            self.resource_logger.log(
+                f"预测数据填充后统计: 形状={X.shape}, "
+                f"min={np.min(X):.6f}, max={np.max(X):.6f}, "
+                f"mean={np.mean(X):.6f}, std={np.std(X):.6f}"
+            )
             pred_detector.check_nan(X, "预测：填充后")
-            self.resource_logger.log(f"填充后X形状: {X.shape}")
+            # 新增：检查极端值
+            pred_extreme_detector.check_extreme(X, "预测数据填充后")
             
             # 标准化（与训练时一致）
             non_pad_mask = X != -10.0  # 关键修改：识别-10作为填充值
             if np.any(non_pad_mask):
+                # 新增：标准化前的统计信息
+                pre_norm_data = X[non_pad_mask]
+                pre_norm_stats = {
+                    'min': np.min(pre_norm_data),
+                    'max': np.max(pre_norm_data),
+                    'mean': np.mean(pre_norm_data),
+                    'std': np.std(pre_norm_data)
+                }
+                self.resource_logger.log(
+                    f"预测数据标准化前统计: "
+                    f"min={pre_norm_stats['min']:.6f}, max={pre_norm_stats['max']:.6f}, "
+                    f"mean={pre_norm_stats['mean']:.6f}, std={pre_norm_stats['std']:.6f}"
+                )
+                
                 # 只标准化非填充值
-                mean = np.mean(X[non_pad_mask])
-                std = np.std(X[non_pad_mask])
+                mean = np.mean(pre_norm_data)
+                std = np.std(pre_norm_data)
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
+                
+                # 新增：标准化后的统计信息
+                post_norm_data = X[non_pad_mask]
+                post_norm_stats = {
+                    'min': np.min(post_norm_data),
+                    'max': np.max(post_norm_data),
+                    'mean': np.mean(post_norm_data),
+                    'std': np.std(post_norm_data)
+                }
+                self.resource_logger.log(
+                    f"预测数据标准化后统计: "
+                    f"min={post_norm_stats['min']:.6f}, max={post_norm_stats['max']:.6f}, "
+                    f"mean={post_norm_stats['mean']:.6f}, std={post_norm_stats['std']:.6f}"
+                )
+                
                 pred_detector.check_nan(X, "预测：标准化后")
+                # 新增：检查极端值
+                pred_extreme_detector.check_extreme(X, "预测数据标准化后")
             
             # 模型预测
             self.resource_logger.log(f"预测输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
             y_pred = self.model.predict(X, verbose=0).argmax(axis=-1)
-            self.resource_logger.log(f"模型原始预测输出形状: {y_pred.shape}")
+            
+            # 新增：预测输出的统计信息
+            self.resource_logger.log(
+                f"模型原始预测输出统计: 形状={y_pred.shape}, "
+                f"min={np.min(y_pred):.6f}, max={np.max(y_pred):.6f}, "
+                f"mean={np.mean(y_pred):.6f}, std={np.std(y_pred):.6f}"
+            )
             
             # 根据原始长度裁剪，去除填充部分
             trimmed_preds = []
@@ -1435,6 +1822,8 @@ class DeepSoundBaseRNN:
                 raise RuntimeError("请先调用fit方法训练模型")
             
             pred_detector = NaNDetector(verbose=True)
+            # 新增：初始化预测用极端值检测器
+            pred_extreme_detector = AudioExtremeDetector()
             self.resource_logger.log("\n===== 开始预测概率 =====")
             
             # 提取嵌套样本
@@ -1451,14 +1840,28 @@ class DeepSoundBaseRNN:
                         sample_array = np.array(sample, dtype='float32')
                         X_array.append(sample_array)
                         pred_original_lengths.append(sample_array.shape[0])
-                        self.resource_logger.log(f"预测概率样本{i}：已转换为数组，形状={sample_array.shape}，原始长度={sample_array.shape[0]}")
+                        # 新增：预测概率样本的统计信息
+                        self.resource_logger.log(
+                            f"预测概率样本{i}：已转换为数组，形状={sample_array.shape}，原始长度={sample_array.shape[0]}, "
+                            f"min={np.min(sample_array):.6f}, max={np.max(sample_array):.6f}, "
+                            f"mean={np.mean(sample_array):.6f}, std={np.std(sample_array):.6f}"
+                        )
+                        # 新增：检查极端值
+                        pred_extreme_detector.check_extreme(sample_array, f"预测概率样本{i}原始数据")
                     except ValueError as e:
                         self.resource_logger.log(f"预测概率样本{i}：转换失败！错误：{e}")
                         raise
                 elif isinstance(sample, np.ndarray):
                     X_array.append(sample)
                     pred_original_lengths.append(sample.shape[0])
-                    self.resource_logger.log(f"预测概率样本{i}：已是数组，形状={sample.shape}，原始长度={sample.shape[0]}")
+                    # 新增：预测概率样本的统计信息
+                    self.resource_logger.log(
+                        f"预测概率样本{i}：已是数组，形状={sample.shape}，原始长度={sample.shape[0]}, "
+                        f"min={np.min(sample):.6f}, max={np.max(sample):.6f}, "
+                        f"mean={np.mean(sample):.6f}, std={np.std(sample):.6f}"
+                    )
+                    # 新增：检查极端值
+                    pred_extreme_detector.check_extreme(sample, f"预测概率样本{i}原始数据")
                 else:
                     raise TypeError(f"预测概率样本{i}：类型错误={type(sample)}")
             X = X_array
@@ -1499,21 +1902,68 @@ class DeepSoundBaseRNN:
             X = np.array(X_padded, dtype='float32')
             if X.ndim == 3:
                 X = np.expand_dims(X, axis=-1)
+            
+            # 新增：填充后的统计信息
+            self.resource_logger.log(
+                f"预测概率数据填充后统计: 形状={X.shape}, "
+                f"min={np.min(X):.6f}, max={np.max(X):.6f}, "
+                f"mean={np.mean(X):.6f}, std={np.std(X):.6f}"
+            )
             pred_detector.check_nan(X, "预测概率：填充后")
+            # 新增：检查极端值
+            pred_extreme_detector.check_extreme(X, "预测概率数据填充后")
             
             # 标准化
             non_pad_mask = X != -10.0  # 关键修改：识别-10作为填充值
             if np.any(non_pad_mask):
+                # 新增：标准化前的统计信息
+                pre_norm_data = X[non_pad_mask]
+                pre_norm_stats = {
+                    'min': np.min(pre_norm_data),
+                    'max': np.max(pre_norm_data),
+                    'mean': np.mean(pre_norm_data),
+                    'std': np.std(pre_norm_data)
+                }
+                self.resource_logger.log(
+                    f"预测概率数据标准化前统计: "
+                    f"min={pre_norm_stats['min']:.6f}, max={pre_norm_stats['max']:.6f}, "
+                    f"mean={pre_norm_stats['mean']:.6f}, std={pre_norm_stats['std']:.6f}"
+                )
+                
                 # 只标准化非填充值
-                mean = np.mean(X[non_pad_mask])
-                std = np.std(X[non_pad_mask])
+                mean = np.mean(pre_norm_data)
+                std = np.std(pre_norm_data)
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
+                
+                # 新增：标准化后的统计信息
+                post_norm_data = X[non_pad_mask]
+                post_norm_stats = {
+                    'min': np.min(post_norm_data),
+                    'max': np.max(post_norm_data),
+                    'mean': np.mean(post_norm_data),
+                    'std': np.std(post_norm_data)
+                }
+                self.resource_logger.log(
+                    f"预测概率数据标准化后统计: "
+                    f"min={post_norm_stats['min']:.6f}, max={post_norm_stats['max']:.6f}, "
+                    f"mean={post_norm_stats['mean']:.6f}, std={post_norm_stats['std']:.6f}"
+                )
+                
                 pred_detector.check_nan(X, "预测概率：标准化后")
+                # 新增：检查极端值
+                pred_extreme_detector.check_extreme(X, "预测概率数据标准化后")
             
             # 预测概率
             self.resource_logger.log(f"预测概率输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
             y_pred_proba = self.model.predict(X, verbose=0)
+            
+            # 新增：预测概率输出的统计信息
+            self.resource_logger.log(
+                f"预测概率输出统计: 形状={y_pred_proba.shape}, "
+                f"min={np.min(y_pred_proba):.6f}, max={np.max(y_pred_proba):.6f}, "
+                f"mean={np.mean(y_pred_proba):.6f}, std={np.std(y_pred_proba):.6f}"
+            )
             
             # 根据原始长度裁剪，去除填充部分
             trimmed_probs = []

@@ -5,7 +5,7 @@ import logging
 from scipy.interpolate import interp1d
 
 
-logger = logging.getLogger('yaer')  # 新增日志实例
+logger = logging.getLogger('yaer')  # 保持原日志实例
 
 
 def windows2events(y_pred,
@@ -201,10 +201,23 @@ class AudioExtremeDetector:
         if isinstance(data, np.ndarray):
             min_val = np.min(data)
             max_val = np.max(data)
+            mean_val = np.mean(data)  # 新增：均值统计
+            std_val = np.std(data)    # 新增：标准差统计
             extreme_count = np.sum((data < self.low) | (data > self.high))
+            
+            # 无论是否有极端值，均记录完整统计特征（定位问题核心）
+            logger.info(
+                f"步骤[{step_name}]数据统计: "
+                f"min={min_val:.4f}, max={max_val:.4f}, "
+                f"mean={mean_val:.4f}, std={std_val:.4f}, "
+                f"极端值数量={extreme_count}, 处理链: {'->'.join(self.process_history)}"
+            )
+            
             if extreme_count > 0:
+                # 新增极端值占比计算，增强异常严重性判断
+                extreme_ratio = extreme_count / len(data) if len(data) > 0 else 0
                 logger.warning(
-                    f"步骤[{step_name}]出现极端值: min={min_val:.4f}, max={max_val:.4f}, "
-                    f"数量={extreme_count}, 处理链: {'->'.join(self.process_history)}"
+                    f"步骤[{step_name}]出现极端值: 超出范围[{self.low}, {self.high}], "
+                    f"占比={extreme_ratio:.2%} (数量={extreme_count}/{len(data)})"
                 )
         return data
