@@ -177,6 +177,19 @@ def main(data_source_names=['zavalla2022'],
                 for i in range(1, 10):
                     signal_axis_values = pd.read_csv(segment[i],
                                                     names=['axis_value']).axis_value.values
+                    
+                    # 检查IMU原始数据中的NaN和极端值
+                    if np.isnan(signal_axis_values).any():
+                        nan_count = np.sum(np.isnan(signal_axis_values))
+                        logger.warning(f"IMU文件{segment[i]}存在{nan_count}个NaN值，占比{nan_count/len(signal_axis_values):.2%}")
+                        signal_axis_values = np.nan_to_num(signal_axis_values, nan=0.0)
+                    
+                    # 检查极端值
+                    axis_min = np.min(signal_axis_values)
+                    axis_max = np.max(signal_axis_values)
+                    if axis_min < -1e6 or axis_max > 1e6:  # 假设IMU数据不会超过这个范围
+                        logger.warning(f"IMU文件{segment[i]}存在极端值，min={axis_min:.4f}, max={axis_max:.4f}")
+                    
                     data_sampling_frequency = available_datasets[dataset].imu_sampling_frequency
                     if data_sampling_frequency != movement_sampling_frequency:
                         sampling_relation = data_sampling_frequency / movement_sampling_frequency
@@ -188,6 +201,12 @@ def main(data_source_names=['zavalla2022'],
                         imu_data.append(signal_axis_values)
 
                 if include_movement_magnitudes:
+                    # 计算模值前再次检查是否有NaN
+                    for i in range(9):
+                        if np.isnan(imu_data[i]).any():
+                            logger.warning(f"计算模值前，IMU通道{i}存在NaN值")
+                            imu_data[i] = np.nan_to_num(imu_data[i], nan=0.0)
+                            
                     accelerometer_magnitude = \
                         np.sqrt(imu_data[0] **2 + imu_data[1]** 2 + imu_data[2] **2)
                     imu_data.append(accelerometer_magnitude)
@@ -204,7 +223,18 @@ def main(data_source_names=['zavalla2022'],
                     for channel in filter[1]:
                         filter_method = filter[0]
                         if filter[2] and dataset_has_movement_data:
+                            # 滤波前检查IMU数据
+                            if np.isnan(imu_data[channel]).any():
+                                logger.warning(f"滤波前，IMU通道{channel}存在NaN值")
+                                imu_data[channel] = np.nan_to_num(imu_data[channel], nan=0.0)
+                            
                             imu_data[channel] = filter_method(imu_data[channel])
+                            
+                            # 滤波后检查IMU数据
+                            if np.isnan(imu_data[channel]).any():
+                                nan_count = np.sum(np.isnan(imu_data[channel]))
+                                logger.warning(f"滤波后，IMU通道{channel}存在{nan_count}个NaN值")
+                                imu_data[channel] = np.nan_to_num(imu_data[channel], nan=0.0)
                         else:
                             # 对音频信号滤波
                             audio_signal = filter_method(audio_signal)
@@ -260,6 +290,10 @@ def main(data_source_names=['zavalla2022'],
             # 检查音频窗口
             audio_has_nan = any(np.isnan(window).any() for window in audio_windows)
             logger.info(f"Segment {segment_name} audio windows have NaN: {audio_has_nan}")
+            # 处理音频窗口中的NaN
+            if audio_has_nan:
+                logger.warning(f"处理音频窗口中的NaN值")
+                audio_windows = np.nan_to_num(audio_windows, nan=0.0, posinf=0.0, neginf=0.0)
             
             
             imu_windows = []
@@ -269,6 +303,23 @@ def main(data_source_names=['zavalla2022'],
                     sampling_frequency=movement_sampling_frequency,
                     window_width=window_width,
                     window_overlap=window_overlap)
+
+                # 检查IMU窗口是否有NaN
+                imu_has_nan = any(np.isnan(window).any() for imu_window in imu_windows for window in imu_window)
+                logger.info(f"Segment {segment_name} IMU windows have NaN: {imu_has_nan}")
+                
+                # 检查IMU窗口是否有极端值
+                imu_has_extreme = False
+                for i, imu_window in enumerate(imu_windows):
+                    for j, channel in enumerate(imu_window):
+                        if np.any(channel < -1e6) or np.any(channel > 1e6):
+                            imu_has_extreme = True
+                            logger.warning(f"IMU窗口{i}通道{j}存在极端值")
+                
+                # 处理IMU窗口中的NaN和极端值
+                if imu_has_nan or imu_has_extreme:
+                    logger.warning(f"处理IMU窗口中的NaN和极端值")
+                    imu_windows = np.nan_to_num(imu_windows, nan=0.0, posinf=1e6, neginf=-1e6)
 
                 if len(audio_windows) - len(imu_windows) == 1:
                     logger.info('Removing last audio window in order to align with imu windows !')
@@ -350,6 +401,11 @@ def get_windows_from_audio_signal(
     windows : list of lists.
         Extracted windows.
     '''
+    # 确保输入信号中没有NaN
+    if np.isnan(signal).any():
+        logger.warning("音频信号中存在NaN值，已替换为0")
+        signal = np.nan_to_num(signal, nan=0.0)
+        
     windows = librosa.util.frame(signal,
                                  frame_length=int(sampling_frequency * window_width),
                                  hop_length=int((1 - window_overlap) * int(sampling_frequency *
@@ -388,6 +444,11 @@ def get_windows_from_imu_signals(
 
     signals = []
     for ix in range(len(imu_data)):
+        # 确保每个IMU通道没有NaN
+        if np.isnan(imu_data[ix]).any():
+            logger.warning(f"IMU通道{ix}中存在NaN值，已替换为0")
+            imu_data[ix] = np.nan_to_num(imu_data[ix], nan=0.0)
+            
         signals.append(
             librosa.util.frame(imu_data[ix],
                                frame_length=frame_length,
