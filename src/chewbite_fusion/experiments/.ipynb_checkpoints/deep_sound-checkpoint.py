@@ -23,7 +23,7 @@ def get_model_instance(variable_params):
 
 
 @experiment()
-def deep_sound():
+def deep_sound_n():
     """ Experiment with Deep Sound architecture.
     """
     # 启用数值检查（如需调试数值问题可取消注释）
