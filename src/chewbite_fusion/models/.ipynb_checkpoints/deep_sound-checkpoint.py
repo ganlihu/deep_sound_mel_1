@@ -4,6 +4,7 @@ import time
 import numpy as np
 import tensorflow as tf
 import psutil
+import logging
 from datetime import datetime
 from typing import List, Tuple, Optional, Union, Dict
 try:
@@ -26,12 +27,16 @@ if gpus:
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers import Adagrad  # 代码二使用的优化器
 from tensorflow.keras import activations
 from tensorflow.keras.initializers import HeUniform
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, CSVLogger
 from chewbite_fusion.data.utils import NaNDetector
 import traceback
+
+# 初始化模块日志（代码二功能）
+logger = logging.getLogger('yaer')
+logging.basicConfig(level=logging.INFO)
 
 
 class ResourceLogger:
@@ -67,6 +72,8 @@ class ResourceLogger:
         entry = f"[{timestamp}] {message}" if include_timestamp else message
         self.log_entries.append(entry)
         print(message)
+        # 同时输出到logging（代码二功能）
+        logger.info(message)
     
     def record_system_info(self) -> None:
         self.log("===== 系统基本信息 =====")
@@ -389,14 +396,16 @@ class GradientMonitor(keras.callbacks.Callback):
 
 
 class DeepSoundBaseRNN:
-    """RNN基础类，支持动态填充及多GPU训练"""
+    """RNN基础类，支持动态填充及多GPU训练，整合代码一和代码二功能"""
     def __init__(self,
-                 batch_size: int = 8,
+                 batch_size: int = 5,  # 代码二默认值
                  n_epochs: int = 1400,
                  input_size: int = 1800,
                  set_sample_weights: bool = True,
                  feature_scaling: bool = True,
-                 output_size: int = 4):  # 新增output_size参数
+                 output_size: int = 4,  # 代码一的output_size参数
+                 training_reshape: bool = False,  # 代码二参数
+                 validation_split: float = 0.2):  # 代码二参数
         self.classes_: Optional[List[int]] = None
         self.padding_class: Optional[int] = None  # 填充类别标记
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
@@ -407,7 +416,7 @@ class DeepSoundBaseRNN:
         self.batch_size = batch_size
         self.n_epochs = n_epochs
         self.data_format = 'channels_last'
-        self.padding = "same"
+        self.padding = "valid"  # 代码二使用valid padding
         self.set_sample_weights = set_sample_weights
         self.feature_scaling = feature_scaling
         self.model: Optional[keras.Model] = None
@@ -417,22 +426,29 @@ class DeepSoundBaseRNN:
         self.strategy: Optional[tf.distribute.Strategy] = None
         self.resource_logger = ResourceLogger()
         os.makedirs(self.model_save_path, exist_ok=True)
+        
+        # 代码二特有参数
+        self.training_reshape = training_reshape
+        self.validation_split = validation_split
+        self.ghost_dim = 2  # 代码二特有参数
+        self.feature_dim = 1  # 代码二特有参数
+        self.fold_index = 0  # 代码二用于多折训练的标识
 
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
-        """构建模型结构，优化维度转换和正则化（减少显存占用）"""
+        """构建模型结构，使用代码二的模型参数配置"""
         # 打印模型输出维度
         self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={max_seq_len}")
         
-        # 核心修改1：减少CNN卷积核数量，降低特征维度
+        # 使用代码二的layers_config参数
         layers_config = [
-            (16, 18, 3, activations.relu),  # 原32 -> 16
-            (16, 9, 1, activations.relu),   # 原32 -> 16
-            (32, 3, 1, activations.relu)    # 原64 -> 32
+            (32, 18, 3, activations.relu),
+            (32, 9, 1, activations.relu),
+            (128, 3, 1, activations.relu)
         ]
 
         # CNN子网络 - 用于特征提取
         cnn = Sequential(name='cnn_subnetwork')
-        cnn.add(layers.Rescaling(scale=1.0, name='input_rescaling'))
+        cnn.add(layers.Rescaling(scale=1./255, name='input_rescaling'))  # 代码二使用的缩放
 
         for ix_l, layer in enumerate(layers_config):
             # 第一个卷积块
@@ -440,81 +456,70 @@ class DeepSoundBaseRNN:
                 layer[0],
                 kernel_size=layer[1],
                 strides=layer[2],
-                activation=None,
+                activation=layer[3],  # 代码二直接在这里设置激活函数
                 padding=self.padding,
                 data_format=self.data_format,
                 kernel_initializer=HeUniform(),
                 name=f'conv1d_{ix_l*2 + 1}'
             ))
-            cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 1}'))
-            cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 1}'))
 
             # 第二个卷积块
             cnn.add(layers.Conv1D(
                 layer[0],
                 kernel_size=layer[1],
                 strides=layer[2],
-                activation=None,
+                activation=layer[3],  # 代码二直接在这里设置激活函数
                 padding=self.padding,
                 data_format=self.data_format,
                 kernel_initializer=HeUniform(),
                 name=f'conv1d_{ix_l*2 + 2}'
             ))
-            cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 2}'))
-            cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 2}'))
 
             # 除最后一层外添加Dropout
             if ix_l < (len(layers_config) - 1):
-                cnn.add(layers.Dropout(rate=0.3, name=f'dropout_{ix_l + 1}'))
+                cnn.add(layers.Dropout(rate=0.2, name=f'dropout_{ix_l + 1}'))  # 代码二使用0.2
 
         cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
         cnn.add(layers.Flatten(name='flatten'))
-        cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))
+        cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))  # 代码二使用0.2
 
-        # 核心修改2：减少FFN维度，降低参数数量
+        # 使用代码二的FFN参数
         ffn = Sequential(name='ffn_subnetwork')
-        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))  # 原256 -> 128
-        ffn.add(layers.BatchNormalization(name='ffn_bn_1'))
-        ffn.add(layers.Activation(activations.relu, name='ffn_act_1'))
-        ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_1'))
-        
-        ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))   # 原128 -> 64
-        ffn.add(layers.BatchNormalization(name='ffn_bn_2'))
-        ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
-        ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
-        
+        ffn.add(layers.Dense(256, activation=activations.relu, kernel_initializer=HeUniform(), name='ffn_dense_1'))
+        ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_1'))  # 代码二使用0.2
+        ffn.add(layers.Dense(128, activation=activations.relu, kernel_initializer=HeUniform(), name='ffn_dense_2'))
+        ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_2'))  # 代码二使用0.2
         ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
 
-        # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
+        # 使用代码二的GRU参数
         model = Sequential([
-            layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
+            layers.InputLayer(input_shape=(None, self.input_size, 1), name='input1'),  # 代码二支持动态长度
             layers.TimeDistributed(cnn, name='time_distributed_cnn'),
             layers.Bidirectional(
-                layers.GRU(64,  # 原128 -> 64
+                layers.GRU(128,  # 代码二使用128
                            activation="tanh", 
                            return_sequences=True, 
-                           dropout=0.3,
-                           recurrent_dropout=0.2,
+                           dropout=0.2,  # 代码二使用0.2
                            kernel_initializer=HeUniform()),
                 name='bidirectional_gru'
             ),
             layers.TimeDistributed(ffn, name='time_distributed_ffn')
         ])
 
+        # 代码二使用Adagrad优化器
         model.compile(
-            optimizer=Adam(
-                learning_rate=1e-4,
-                clipnorm=1.0,
-                clipvalue=0.5
-            ),
+            optimizer=Adagrad(),
             loss='sparse_categorical_crossentropy',
             weighted_metrics=['accuracy']
         )
 
         return model
 
-    def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray]) -> None:
-        """训练模型"""
+    def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray], fold_index=0) -> None:
+        """训练模型，整合代码二的功能"""
+        # 代码二功能：接收折数参数
+        self.fold_index = fold_index
+        
         self.nan_detector = NaNDetector(verbose=True)
         training_start_time = time.time()
         try:
@@ -523,6 +528,11 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"原始X类型: {type(X)}, 长度: {len(X) if isinstance(X, (list, np.ndarray)) else 'N/A'}")
             self.resource_logger.log(f"原始y类型: {type(y)}, 长度: {len(y) if isinstance(y, (list, np.ndarray)) else 'N/A'}")
             self.resource_logger.log("="*60)
+            
+            # 代码二功能：确保X和y是列表
+            if not isinstance(X, list):
+                X = [X]
+                y = [y]
             
             # 提取嵌套样本
             if isinstance(X, list) and len(X) == 1 and isinstance(X[0], (list, np.ndarray)):
@@ -536,129 +546,151 @@ class DeepSoundBaseRNN:
             self.nan_detector.check_nan(X, "原始X数据")
             self.nan_detector.check_nan(y, "原始y数据")
             
-            # 转换为NumPy数组
-            self.resource_logger.log("\n===== 转换样本为NumPy数组 =====")
-            X_array: List[np.ndarray] = []
-            self.original_lengths = []  # 重置并记录原始长度
-            for i, sample in enumerate(X):
-                if isinstance(sample, list):
-                    try:
-                        sample_array = np.array(sample, dtype='float32')
-                        X_array.append(sample_array)
-                        self.original_lengths.append(len(sample_array))  # 记录原始长度
-                        self.resource_logger.log(f"样本{i}：已从list转换为数组，形状={sample_array.shape}，原始长度={len(sample_array)}")
-                    except ValueError as e:
-                        self.resource_logger.log(f"样本{i}：列表转换为数组失败！错误：{e}")
-                        raise
-                elif isinstance(sample, np.ndarray):
-                    X_array.append(sample)
-                    self.original_lengths.append(len(sample))  # 记录原始长度
-                    self.resource_logger.log(f"样本{i}：已是数组，形状={sample.shape}，原始长度={len(sample)}")
-                else:
-                    raise TypeError(f"样本{i}：既不是list也不是数组，类型={type(sample)}")
-            X = X_array
-            self.nan_detector.check_nan(X, "转换为数组后的X")
-            self.resource_logger.log("===========================\n")
+            # 处理样本，包含代码二的样本修复逻辑
+            shapes = []
+            valid_samples = []
+            valid_labels = []
             
-            # 统一样本维度
-            X = [
-                np.expand_dims(sample, axis=-1) if (isinstance(sample, np.ndarray) and sample.ndim == 1) 
-                else np.squeeze(sample, axis=-1) if (isinstance(sample, np.ndarray) and sample.ndim == 3 and sample.shape[-1] == 1)
-                else sample 
-                for sample in X
-            ]
-            self.nan_detector.check_nan(X, "统一维度后的X")
-            
-            # 计算最大序列长度
-            if isinstance(X, (list, np.ndarray)):
-                self.max_seq_len = max(len(sample) for sample in X) if X else 0
-                self.resource_logger.log(f"当前批次最长序列长度（窗口数）: {self.max_seq_len}")
-            else:
-                raise ValueError("X必须是列表或NumPy数组")
-
-            # 同步填充X和y（均在末尾填充）
-            target_len = self.max_seq_len
-            X_padded: List[np.ndarray] = []
-            for sample in X:
-                if not isinstance(sample, np.ndarray) or sample.ndim != 2:
-                    raise ValueError(f"样本必须是2维数组，实际样本形状: {sample.shape if isinstance(sample, np.ndarray) else type(sample)}")
-                
-                seq_len, feat_dim = sample.shape
-                # 统一特征维度
-                if feat_dim != self.input_size:
-                    self.resource_logger.log(f"样本特征维度不匹配: 实际{feat_dim}，预期{self.input_size}，自动调整")
-                    if feat_dim > self.input_size:
-                        sample = sample[:, :self.input_size]
+            for i, (x_item, y_item) in enumerate(zip(X, y)):
+                try:
+                    if isinstance(x_item, list):
+                        try:
+                            x_arr = np.array(x_item, dtype='float32')
+                        except ValueError:
+                            processed = []
+                            for elem in x_item:
+                                if isinstance(elem, list):
+                                    elem = np.array(elem, dtype='float32')
+                                processed.append(elem)
+                            x_arr = np.array(processed, dtype='float32')
+                    
+                    elif isinstance(x_item, np.ndarray):
+                        x_arr = x_item.astype('float32')
                     else:
-                        pad_width = ((0, 0), (0, self.input_size - feat_dim))
-                        sample = np.pad(sample, pad_width, mode='constant', constant_values=0.0)
-                
-                # 填充窗口数维度（右填-1.0，与y填充位置一致）
-                padded = keras.preprocessing.sequence.pad_sequences(
-                    sample.T,
-                    maxlen=target_len,
-                    padding='post',
-                    value=-1.0,
-                    dtype='float32'
-                ).T
-                X_padded.append(padded)
-            
-            # 转换为数组
-            try:
-                X = np.array(X_padded, dtype='float32')
-            except ValueError as e:
-                self.resource_logger.log(f"转换为数组失败: {e}")
-                self.resource_logger.log("填充后样本形状:")
-                for i, p in enumerate(X_padded):
-                    self.resource_logger.log(f"样本{i}: {p.shape}")
-                raise
-            
-            self.nan_detector.check_nan(X, "X填充后的数组")
-            
-            # 添加通道维度
-            if X.ndim == 3:
-                X = np.expand_dims(X, axis=-1)
-            self.resource_logger.log(f"X填充后形状: {X.shape}")
-            self.nan_detector.check_nan(X, "添加通道维度后的X")
+                        raise ValueError(f"不支持的特征数据类型: {type(x_item)}")
 
-            # 处理标签和填充类别
-            self.classes_ = list(set(np.concatenate(y))) if y and isinstance(y[0], (list, np.ndarray)) else []
-            self.padding_class = max(self.classes_) + 1 if self.classes_ else 0
-            
-            # 打印填充类别信息
-            self.resource_logger.log(f"训练标签中的类别: {self.classes_}")
-            self.resource_logger.log(f"填充类别编号（padding_class）: {self.padding_class}")
-            
-            # 填充标签（与X同步在末尾填充）
-            y_padded = keras.preprocessing.sequence.pad_sequences(
-                y,
-                maxlen=target_len,
-                padding='post',
-                value=self.padding_class,
-                dtype='int32'
-            )
-            y = y_padded
-            self.resource_logger.log(f"y填充后形状: {y.shape}")
-            self.nan_detector.check_nan(y, "y填充后的数据")
+                    if x_arr.ndim == 1:
+                        x_arr = x_arr.reshape(-1, 1)
+                    elif x_arr.ndim > 2:
+                        x_arr = x_arr.reshape(x_arr.shape[0], -1)
+                    
+                    shapes.append(x_arr.shape)
+                    valid_samples.append(x_arr)
 
-            # 处理X的填充值（替换为均值）
-            non_pad_mask = X != -1.0
-            mean_val = 0.0
-            if np.any(non_pad_mask):
-                mean_val = np.mean(X[non_pad_mask])
-                X[~non_pad_mask] = mean_val
-                self.resource_logger.log(f"X填充值替换为均值: {mean_val:.4f}")
-                self.nan_detector.check_nan(X, "替换填充值后的X")
+                    if y_item is None:
+                        y_arr = np.array([0], dtype=int)
+                    elif isinstance(y_item, list):
+                        cleaned = []
+                        for item in y_item:
+                            if item is not None:
+                                cleaned.append(item)
+                        if not cleaned:
+                            cleaned = [0]
+                        y_arr = np.array(cleaned, dtype=int)
+                    elif isinstance(y_item, np.ndarray):
+                        y_arr = y_item.astype(int)
+                    else:
+                        try:
+                            y_val = int(y_item)
+                            y_arr = np.array([y_val], dtype=int)
+                        except:
+                            y_arr = np.array([0], dtype=int)
+                    
+                    valid_labels.append(y_arr)
+
+                except Exception as e:
+                    # 代码二功能：样本强制修复逻辑
+                    self.resource_logger.log(f"样本 {i} 处理错误 - {str(e)}，尝试强制修复")
+                    try:
+                        if self.max_seq_len is not None:
+                            forced_x = np.full((self.max_seq_len, self.input_size), 
+                                              -100.0, dtype='float32')
+                        else:
+                            forced_x = np.full((100, self.input_size), -100.0, dtype='float32')
+                        valid_samples.append(forced_x)
+                        valid_labels.append(np.array([0], dtype=int))
+                        shapes.append(forced_x.shape)
+                        self.resource_logger.log(f"样本 {i} 已强制修复为默认形状")
+                    except:
+                        self.resource_logger.log(f"样本 {i} 无法修复，已跳过")
+                        continue
+            
+            # 处理空样本情况（代码二功能）
+            if not valid_samples:
+                self.resource_logger.log("所有样本都无效，使用默认数据继续")
+                self.max_seq_len = 100
+                self.feature_dim = self.input_size
+                valid_samples = [np.full((self.max_seq_len, self.feature_dim), -100.0, dtype='float32')]
+                valid_labels = [np.zeros(self.max_seq_len, dtype=int)]
             else:
-                self.resource_logger.log("警告：所有值都是填充值，可能数据异常")
+                self.max_seq_len = max(shape[0] for shape in shapes)
+                self.feature_dim = self.input_size
+                self.resource_logger.log(f"目标形状: 时间步={self.max_seq_len}, 特征维度={self.feature_dim}")
+            
+            # 处理X
+            processed_X = []
+            for x_arr in valid_samples:
+                if x_arr.shape[0] < self.max_seq_len:
+                    pad_length = self.max_seq_len - x_arr.shape[0]
+                    x_padded = np.pad(x_arr, 
+                                     pad_width=((0, pad_length), (0, 0)),
+                                     mode='constant', 
+                                     constant_values=-100.0)  # 代码二使用-100.0作为填充值
+                else:
+                    x_padded = x_arr[:self.max_seq_len, :]
 
-            # 特征标准化
-            if self.feature_scaling and np.any(non_pad_mask):
-                mean = np.mean(X[non_pad_mask])
-                std = np.std(X[non_pad_mask])
-                X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
-                self.resource_logger.log(f"标准化后X统计: min={np.min(X):.4f}, max={np.max(X):.4f}")
-                self.nan_detector.check_nan(X, "标准化后的X")
+                if x_padded.shape[1] < self.feature_dim:
+                    pad_feat = self.feature_dim - x_padded.shape[1]
+                    x_padded = np.pad(x_padded,
+                                     pad_width=((0, 0), (0, pad_feat)),
+                                     mode='constant',
+                                     constant_values=-100.0)
+                else:
+                    x_padded = x_padded[:, :self.feature_dim]
+
+                processed_X.append(x_padded.reshape(1, self.max_seq_len, self.feature_dim, 1))
+
+            X = np.concatenate(processed_X, axis=0)
+            self.resource_logger.log(f"处理后特征形状: {X.shape}")
+            
+            # 处理y
+            processed_y = []
+            for y_arr in valid_labels:
+                if y_arr.ndim > 1:
+                    y_arr = y_arr.flatten()
+                
+                if len(y_arr) < self.max_seq_len:
+                    pad_value = self.padding_class if self.padding_class is not None else 0
+                    y_padded = np.pad(y_arr,
+                                     pad_width=(0, self.max_seq_len - len(y_arr)),
+                                     mode='constant',
+                                     constant_values=pad_value)
+                else:
+                    y_padded = y_arr[:self.max_seq_len]
+                
+                processed_y.append(y_padded.reshape(1, -1))
+
+            y = np.concatenate(processed_y, axis=0)
+            self.resource_logger.log(f"处理后标签形状: {y.shape}")
+            
+            X = X.astype('float32')
+            y = y.astype('float32')
+
+            self.classes_ = list(set(np.ravel(y)))
+            if self.padding_class is None or self.padding_class not in self.classes_:
+                self.padding_class = len(self.classes_) if len(self.classes_) > 0 else 0
+
+            # 代码二功能：动态调整验证集比例
+            num_samples = X.shape[0]
+            actual_validation_split = self.validation_split
+            
+            if num_samples < 5:
+                self.resource_logger.log(f"样本数量较少 ({num_samples}个)，自动调整验证集比例")
+                if num_samples == 1:
+                    actual_validation_split = 0.0
+                else:
+                    actual_validation_split = max(1/num_samples, min(0.1, self.validation_split))
+                self.resource_logger.log(f"调整后验证集比例: {actual_validation_split:.2f}")
 
             # 确定输出维度（使用初始化时传入的output_size）
             output_size = self.output_size
@@ -684,11 +716,19 @@ class DeepSoundBaseRNN:
             self.nan_detector.check_nan(monitor_y, "监控批次y数据")
 
             # 验证集设置
-            use_validation = X.shape[0] >= 5
-            validation_split = 0.2 if use_validation else 0.0
+            use_validation = actual_validation_split > 0
             monitor_loss = 'val_loss' if use_validation else 'loss'
             monitor_acc = 'val_accuracy' if use_validation else 'accuracy'
-            self.resource_logger.log(f"使用验证集: {use_validation}, 验证比例: {validation_split}")
+            self.resource_logger.log(f"使用验证集: {use_validation}, 验证比例: {actual_validation_split}")
+
+            # 代码二功能：创建训练结果目录
+            os.makedirs("training_results", exist_ok=True)
+            
+            # 代码二功能：配置CSV日志回调
+            csv_logger = CSVLogger(
+                f"training_results/fold_{self.fold_index + 1}_metrics.csv",
+                append=False
+            )
 
             # 回调函数
             model_callbacks = [
@@ -714,7 +754,8 @@ class DeepSoundBaseRNN:
                     strategy=self.strategy,
                     resource_logger=self.resource_logger
                 ),
-                GPUUsageMonitor(interval=10, resource_logger=self.resource_logger)
+                GPUUsageMonitor(interval=10, resource_logger=self.resource_logger),
+                csv_logger  # 代码二的CSV日志回调
             ]
 
             # 样本权重（填充部分权重为0）
@@ -733,7 +774,7 @@ class DeepSoundBaseRNN:
                 epochs=self.n_epochs,
                 verbose=1,
                 batch_size=self.batch_size,
-                validation_split=validation_split,
+                validation_split=actual_validation_split,
                 shuffle=True,
                 sample_weight=sample_weights,
                 callbacks=model_callbacks
@@ -768,12 +809,7 @@ class DeepSoundBaseRNN:
             self.resource_logger.save_log()
 
     def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = False) -> Union[List[np.ndarray], np.ndarray]:
-        """模型预测，返回裁剪填充后的真实音频结果
-        Args:
-            X: 输入数据
-            aggregate: 是否聚合序列结果（每个样本返回一个标签），True时返回一维数组，False时返回原始序列
-                       默认值改为False，直接返回窗口级预测
-        """
+        """模型预测，返回裁剪填充后的真实音频结果"""
         try:
             if self.max_seq_len is None:
                 raise RuntimeError("请先调用fit方法训练模型")
@@ -833,12 +869,12 @@ class DeepSoundBaseRNN:
                     else:
                         sample = np.pad(sample, ((0,0), (0, self.input_size-feat_dim)), mode='constant')
                 
-                # 填充窗口数维度（与训练时一致：右填-1.0）
+                # 填充窗口数维度（与训练时一致：右填-100.0，代码二的填充值）
                 padded = keras.preprocessing.sequence.pad_sequences(
                     sample.T,
                     maxlen=self.max_seq_len,  # 使用训练时的最大长度
                     padding='post',           # 与训练时一致
-                    value=-1.0,               # 与训练时一致
+                    value=-100.0,             # 代码二使用-100.0
                     dtype='float32'
                 ).T
                 X_padded.append(padded)
@@ -851,7 +887,7 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"填充后X形状: {X.shape}")
             
             # 标准化（与训练时一致）
-            non_pad_mask = X != -1.0
+            non_pad_mask = X != -100.0  # 对应代码二的填充值
             if np.any(non_pad_mask):
                 mean_val = np.mean(X[non_pad_mask])
                 X[~non_pad_mask] = mean_val
@@ -859,6 +895,10 @@ class DeepSoundBaseRNN:
                 std = np.std(X[non_pad_mask])
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 pred_detector.check_nan(X, "预测：标准化后")
+            
+            # 代码二功能：特征缩放
+            if self.feature_scaling:
+                X = (X + 1.0) * 100
             
             # 模型预测（先获取概率再求标签）
             self.resource_logger.log(f"预测输入形状: {X.shape}")
@@ -1000,7 +1040,7 @@ class DeepSoundBaseRNN:
                     sample.T,
                     maxlen=self.max_seq_len,
                     padding='post',
-                    value=-1.0,
+                    value=-100.0,  # 代码二使用-100.0
                     dtype='float32'
                 ).T
                 X_padded.append(padded)
@@ -1012,7 +1052,7 @@ class DeepSoundBaseRNN:
             pred_detector.check_nan(X, "预测概率：填充后")
             
             # 标准化
-            non_pad_mask = X != -1.0
+            non_pad_mask = X != -100.0  # 代码二使用-100.0
             if np.any(non_pad_mask):
                 mean_val = np.mean(X[non_pad_mask])
                 X[~non_pad_mask] = mean_val
@@ -1020,6 +1060,10 @@ class DeepSoundBaseRNN:
                 std = np.std(X[non_pad_mask])
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 pred_detector.check_nan(X, "预测概率：标准化后")
+            
+            # 代码二功能：特征缩放
+            if self.feature_scaling:
+                X = (X + 1.0) * 100
             
             # 预测概率
             self.resource_logger.log(f"预测概率输入形状: {X.shape}")
@@ -1041,28 +1085,32 @@ class DeepSoundBaseRNN:
             raise
 
     def _get_samples_weights(self, y: np.ndarray) -> np.ndarray:
-        """计算样本权重，填充类别权重为0"""
+        """计算样本权重，填充类别权重为0，使用代码二的实现"""
         unique_classes, counts = np.unique(np.ravel(y), return_counts=True)
-        counts = np.maximum(counts, 1)  # 避免除以0
+        valid_mask = unique_classes != self.padding_class
+        valid_counts = counts[valid_mask]
         
-        # 计算类别权重（平衡类别）
-        class_weight = np.log((counts.max() / counts) + 1.0)
+        if len(valid_counts) == 0:
+            return np.ones_like(y, dtype=float)
         
-        # 填充类别权重设为0（核心：忽略填充部分的影响）
-        if self.padding_class in unique_classes:
-            pad_idx = np.where(unique_classes == self.padding_class)[0][0]
-            class_weight[pad_idx] = 0.0
+        max_count = valid_counts.max()
+        class_weight = {}
+        for cls, cnt in zip(unique_classes, counts):
+            if cls == self.padding_class:
+                class_weight[cls] = 0.0
+            else:
+                class_weight[cls] = max_count / cnt
         
         # 日志输出
         self.resource_logger.log("\n===== 类别权重 =====")
-        for cls, cnt, weight in zip(unique_classes, counts, class_weight):
+        for cls, cnt, weight in zip(unique_classes, counts, class_weight.values()):
             cls_type = "填充类别" if cls == self.padding_class else "普通类别"
             self.resource_logger.log(f"类别 {cls} ({cls_type}): 样本数={cnt}, 权重={weight:.4f}")
         self.resource_logger.log("====================\n")
 
         # 生成样本权重矩阵
         sample_weight = np.zeros_like(y, dtype=float)
-        for class_num, weight in zip(unique_classes, class_weight):
+        for class_num, weight in class_weight.items():
             sample_weight[y == class_num] = weight
 
         return sample_weight
@@ -1079,19 +1127,21 @@ class DeepSoundBaseRNN:
 class DeepSound(DeepSoundBaseRNN):
     """DeepSound模型，继承自RNN基础类"""
     def __init__(self,
-                 batch_size: int = 5,
-                 input_size: int = 4000,
-                 output_size: int = 3,  # 接收动态输出维度
-                 n_epochs: int = 1400,
-                 training_reshape: bool = False,
+                 batch_size: int = 5,  # 代码二默认值
+                 input_size: int = 1800,
+                 output_size: int = 5,  # 代码二默认值
+                 n_epochs: int = 1500,  # 代码二默认值
+                 training_reshape: bool = True,  # 代码二默认值
                  set_sample_weights: bool = True,
-                 feature_scaling: bool = True):
+                 feature_scaling: bool = True,
+                 validation_split: float = 0.2):  # 代码二参数
         super().__init__(
             batch_size=batch_size,
             n_epochs=n_epochs,
             input_size=input_size,
             set_sample_weights=set_sample_weights,
             feature_scaling=feature_scaling,
-            output_size=output_size  # 传递输出维度到父类
+            output_size=output_size,
+            training_reshape=training_reshape,
+            validation_split=validation_split
         )
-        self.training_reshape = training_reshape
