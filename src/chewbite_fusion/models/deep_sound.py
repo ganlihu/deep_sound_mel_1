@@ -27,14 +27,15 @@ if gpus:
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.optimizers import Adagrad  # 代码二使用的优化器
+from tensorflow.keras.optimizers import Adagrad  # 保持代码二使用的优化器
 from tensorflow.keras import activations
 from tensorflow.keras.initializers import HeUniform
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, CSVLogger
+# 假设NaNDetector的路径正确
 from chewbite_fusion.data.utils import NaNDetector
 import traceback
 
-# 初始化模块日志（代码二功能）
+# 初始化模块日志（采用代码二的日志配置）
 logger = logging.getLogger('yaer')
 logging.basicConfig(level=logging.INFO)
 
@@ -57,6 +58,7 @@ class ResourceLogger:
         }
         self.initialized = False
         self.gpu_handles: List = []
+        self.used_devices: List[str] = []  # 记录使用的设备
         
         if pynvml_available:
             try:
@@ -117,6 +119,13 @@ class ResourceLogger:
                 self.log(f"  总显存: {total_vram_gb:.2f} GB")
                 self.log(f"  初始可用显存: {available_vram_gb:.2f} GB")
                 self.memory_peaks['gpu_memory_used'][i] = 0.0
+        
+        # 记录可用计算设备
+        self.log("\n===== 可用计算设备 =====")
+        physical_devices = tf.config.list_physical_devices()
+        for device in physical_devices:
+            self.log(f"设备: {device.name}, 类型: {device.device_type}")
+            self.used_devices.append(device.name)
         
         self.log("========================\n")
     
@@ -182,6 +191,11 @@ class ResourceLogger:
                 except pynvml.NVMLError as e:
                     self.log(f"获取GPU {i} 内存信息失败: {e}")
         
+        # 记录实际使用的设备
+        self.log("\n===== 实际使用的设备 =====")
+        for device in self.used_devices:
+            self.log(f"设备: {device}")
+        
         self.log("=======================\n")
     
     def save_log(self) -> None:
@@ -206,16 +220,78 @@ class GPUUsageMonitor(keras.callbacks.Callback):
         self.interval = interval
         self.resource_logger = resource_logger or ResourceLogger()
         self.start_time = time.time()
+        self.batch_counter = 0
         
     def on_train_begin(self, logs=None) -> None:
         self.start_time = time.time()
         self.resource_logger.log("\n===== 系统资源监控初始化 =====")
         self.resource_logger.record_system_info()
+        
+        # 记录训练开始时使用的设备
+        self.log_used_devices()
+    
+    def log_used_devices(self):
+        """记录当前训练实际使用的设备"""
+        try:
+            # 获取当前模型使用的设备
+            used_devices = set()
+            for layer in self.model.layers:
+                for weight in layer.weights:
+                    device = weight.device
+                    if device:
+                        used_devices.add(device)
+            
+            self.resource_logger.log("\n===== 训练使用的设备 =====")
+            for device in used_devices:
+                self.resource_logger.log(f"使用设备: {device}")
+                if device not in self.resource_logger.used_devices:
+                    self.resource_logger.used_devices.append(device)
+            self.resource_logger.log("==========================\n")
+        except Exception as e:
+            self.resource_logger.log(f"记录使用设备时出错: {str(e)}")
     
     def on_train_batch_end(self, batch: int, logs=None) -> None:
-        if batch % self.interval == 0:
+        self.batch_counter += 1
+        # 每N个批次记录一次资源使用情况，而不仅仅是更新峰值
+        if self.batch_counter % self.interval == 0:
             self.resource_logger.update_memory_peaks(batch=batch)
+            self.log_batch_resource_usage(batch)
             
+    def log_batch_resource_usage(self, batch):
+        """记录当前批次的资源使用情况"""
+        self.resource_logger.log(f"\n===== Batch {batch} 资源使用统计 =====")
+        
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory()
+        self.resource_logger.log(f"CPU使用率: {cpu_percent}%")
+        self.resource_logger.log(f"内存状态: "
+                               f"已用 {mem.used / (1024**3):.2f} GB / "
+                               f"总 {mem.total / (1024**3):.2f} GB / "
+                               f"可用 {mem.available / (1024**3):.2f} GB ({100 - mem.percent}%)")
+        
+        if pynvml_available and self.resource_logger.initialized:
+            for i, handle in enumerate(self.resource_logger.gpu_handles):
+                try:
+                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                    used_vram = mem_info.used / (1024**3)
+                    total_vram = mem_info.total / (1024**3)
+                    available_vram = mem_info.free / (1024**3)
+                    
+                    self.resource_logger.log(
+                        f"GPU {i} 状态: "
+                        f"使用率 {util.gpu}%, "
+                        f"显存(已用/总/可用): {used_vram:.2f} / {total_vram:.2f} / {available_vram:.2f} GB, "
+                        f"温度 {temp}°C"
+                    )
+                except pynvml.NVMLError as e:
+                    self.resource_logger.log(f"GPU {i} 信息获取失败: {e}")
+        
+        process = psutil.Process(os.getpid())
+        self.resource_logger.log(f"当前进程内存使用: {process.memory_info().rss / (1024**3):.2f} GB")
+        self.resource_logger.log("=================================\n")
+    
     def on_epoch_end(self, epoch: int, logs=None) -> None:
         self.resource_logger.update_memory_peaks(epoch=epoch)
         self.resource_logger.log(f"\n===== Epoch {epoch} 资源使用统计 =====")
@@ -403,7 +479,7 @@ class DeepSoundBaseRNN:
                  input_size: int = 1800,
                  set_sample_weights: bool = True,
                  feature_scaling: bool = True,
-                 output_size: int = 4,  # 代码一的output_size参数
+                 output_size: int = 4,  # 保留代码一的output_size参数
                  training_reshape: bool = False,  # 代码二参数
                  validation_split: float = 0.2):  # 代码二参数
         self.classes_: Optional[List[int]] = None
@@ -433,87 +509,6 @@ class DeepSoundBaseRNN:
         self.ghost_dim = 2  # 代码二特有参数
         self.feature_dim = 1  # 代码二特有参数
         self.fold_index = 0  # 代码二用于多折训练的标识
-
-    def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
-        """构建模型结构，使用代码二的模型参数配置"""
-        # 打印模型输出维度
-        self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={max_seq_len}")
-        
-        # 使用代码二的layers_config参数
-        layers_config = [
-            (32, 18, 3, activations.relu),
-            (32, 9, 1, activations.relu),
-            (128, 3, 1, activations.relu)
-        ]
-
-        # CNN子网络 - 用于特征提取
-        cnn = Sequential(name='cnn_subnetwork')
-        cnn.add(layers.Rescaling(scale=1./255, name='input_rescaling'))  # 代码二使用的缩放
-
-        for ix_l, layer in enumerate(layers_config):
-            # 第一个卷积块
-            cnn.add(layers.Conv1D(
-                layer[0],
-                kernel_size=layer[1],
-                strides=layer[2],
-                activation=layer[3],  # 代码二直接在这里设置激活函数
-                padding=self.padding,
-                data_format=self.data_format,
-                kernel_initializer=HeUniform(),
-                name=f'conv1d_{ix_l*2 + 1}'
-            ))
-
-            # 第二个卷积块
-            cnn.add(layers.Conv1D(
-                layer[0],
-                kernel_size=layer[1],
-                strides=layer[2],
-                activation=layer[3],  # 代码二直接在这里设置激活函数
-                padding=self.padding,
-                data_format=self.data_format,
-                kernel_initializer=HeUniform(),
-                name=f'conv1d_{ix_l*2 + 2}'
-            ))
-
-            # 除最后一层外添加Dropout
-            if ix_l < (len(layers_config) - 1):
-                cnn.add(layers.Dropout(rate=0.2, name=f'dropout_{ix_l + 1}'))  # 代码二使用0.2
-
-        cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
-        cnn.add(layers.Flatten(name='flatten'))
-        cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))  # 代码二使用0.2
-
-        # 使用代码二的FFN参数
-        ffn = Sequential(name='ffn_subnetwork')
-        ffn.add(layers.Dense(256, activation=activations.relu, kernel_initializer=HeUniform(), name='ffn_dense_1'))
-        ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_1'))  # 代码二使用0.2
-        ffn.add(layers.Dense(128, activation=activations.relu, kernel_initializer=HeUniform(), name='ffn_dense_2'))
-        ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_2'))  # 代码二使用0.2
-        ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
-
-        # 使用代码二的GRU参数
-        model = Sequential([
-            layers.InputLayer(input_shape=(None, self.input_size, 1), name='input1'),  # 代码二支持动态长度
-            layers.TimeDistributed(cnn, name='time_distributed_cnn'),
-            layers.Bidirectional(
-                layers.GRU(128,  # 代码二使用128
-                           activation="tanh", 
-                           return_sequences=True, 
-                           dropout=0.2,  # 代码二使用0.2
-                           kernel_initializer=HeUniform()),
-                name='bidirectional_gru'
-            ),
-            layers.TimeDistributed(ffn, name='time_distributed_ffn')
-        ])
-
-        # 代码二使用Adagrad优化器
-        model.compile(
-            optimizer=Adagrad(),
-            loss='sparse_categorical_crossentropy',
-            weighted_metrics=['accuracy']
-        )
-
-        return model
 
     def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray], fold_index=0) -> None:
         """训练模型，整合代码二的功能"""
@@ -692,18 +687,23 @@ class DeepSoundBaseRNN:
                     actual_validation_split = max(1/num_samples, min(0.1, self.validation_split))
                 self.resource_logger.log(f"调整后验证集比例: {actual_validation_split:.2f}")
 
-            # 确定输出维度（使用初始化时传入的output_size）
+            # 确定输出维度（使用初始化时传入的output_size，保留代码一的维度）
             output_size = self.output_size
             
-            # 分布式训练设置
-            self.strategy = tf.distribute.MirroredStrategy()
-            self.resource_logger.log(f"已检测到 {self.strategy.num_replicas_in_sync} 个GPU，将用于分布式训练")
+            # 分布式训练设置（保留代码一的功能）
+            try:
+                self.strategy = tf.distribute.MirroredStrategy()
+                self.resource_logger.log(f"已检测到 {self.strategy.num_replicas_in_sync} 个GPU，将用于分布式训练")
+            except tf.errors.UnavailableError:
+                self.resource_logger.log("无法初始化分布式策略，将使用单设备训练")
+                self.strategy = tf.distribute.get_strategy()  # 默认策略
             
             with self.strategy.scope():
-                self.model = self._build_model(max_seq_len=self.max_seq_len, output_size=output_size)
+                # 构建模型（采用代码二的模型构建方式）
+                self._build_model(output_size)
             
             self.weights_ = copy.deepcopy(self.model.get_weights())
-            self.resource_logger.log("\n模型初始化完成（多GPU支持），结构如下：")
+            self.resource_logger.log("\n模型初始化完成，结构如下：")
             self.model.summary(print_fn=self.resource_logger.log)
 
             # 准备监控批次
@@ -730,7 +730,7 @@ class DeepSoundBaseRNN:
                 append=False
             )
 
-            # 回调函数
+            # 回调函数（整合两者的回调）
             model_callbacks = [
                 EarlyStopping(patience=50, restore_best_weights=True, monitor=monitor_loss),
                 ModelCheckpoint(
@@ -767,18 +767,43 @@ class DeepSoundBaseRNN:
                 self.nan_detector.check_nan(sample_weights, "样本权重")
 
             # 开始训练
-            self.resource_logger.log(f"\n【开始训练】样本数: {X.shape[0]}, 批次大小: {self.batch_size}, GPU数量: {self.strategy.num_replicas_in_sync}")
-            history = self.model.fit(
-                x=X,
-                y=y,
-                epochs=self.n_epochs,
-                verbose=1,
-                batch_size=self.batch_size,
-                validation_split=actual_validation_split,
-                shuffle=True,
-                sample_weight=sample_weights,
-                callbacks=model_callbacks
-            )
+            self.resource_logger.log(f"\n【开始训练】样本数: {X.shape[0]}, 批次大小: {self.batch_size}, "
+                                   f"使用设备数量: {self.strategy.num_replicas_in_sync}")
+            
+            # 添加分布式训练的稳定性处理
+            try:
+                history = self.model.fit(
+                    x=X,
+                    y=y,
+                    epochs=self.n_epochs,
+                    verbose=1,
+                    batch_size=self.batch_size,
+                    validation_split=actual_validation_split,
+                    shuffle=True,
+                    sample_weight=sample_weights,
+                    callbacks=model_callbacks
+                )
+            except tf.errors.CancelledError as e:
+                self.resource_logger.log(f"训练过程中发生分布式通信错误: {str(e)}")
+                self.resource_logger.log("尝试使用单设备模式重新训练...")
+                
+                # 切换到单设备模式
+                self.strategy = tf.distribute.get_strategy()  # 默认单设备策略
+                with self.strategy.scope():
+                    self._build_model(output_size)
+                    
+                # 重新训练
+                history = self.model.fit(
+                    x=X,
+                    y=y,
+                    epochs=self.n_epochs,
+                    verbose=1,
+                    batch_size=self.batch_size,
+                    validation_split=actual_validation_split,
+                    shuffle=True,
+                    sample_weight=sample_weights,
+                    callbacks=model_callbacks
+                )
 
             # 训练总结
             training_time = time.time() - training_start_time
@@ -787,7 +812,8 @@ class DeepSoundBaseRNN:
                 "实际训练轮次": str(len(history.history['loss'])),
                 "最终训练损失": f"{history.history['loss'][-1]:.4f}",
                 "最终训练准确率": f"{history.history['accuracy'][-1]:.4f}",
-                "总训练时间": f"{training_time:.2f}秒"
+                "总训练时间": f"{training_time:.2f}秒",
+                "使用设备数量": str(self.strategy.num_replicas_in_sync)
             }
             
             if use_validation:
@@ -809,13 +835,23 @@ class DeepSoundBaseRNN:
             self.resource_logger.save_log()
 
     def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = False) -> Union[List[np.ndarray], np.ndarray]:
-        """模型预测，返回裁剪填充后的真实音频结果"""
+        """模型预测，返回裁剪填充后的真实音频结果（保留代码一的维度处理）"""
         try:
             if self.max_seq_len is None:
                 raise RuntimeError("请先调用fit方法训练模型")
             
             pred_detector = NaNDetector(verbose=True)
             self.resource_logger.log("\n===== 开始预测 =====")
+            
+            # 记录预测时使用的设备
+            self.resource_logger.log("预测使用的设备:")
+            try:
+                for layer in self.model.layers:
+                    for weight in layer.weights:
+                        if weight.device:
+                            self.resource_logger.log(f"  {weight.name} 在 {weight.device} 上")
+            except Exception as e:
+                self.resource_logger.log(f"记录预测设备时出错: {str(e)}")
             
             # 提取嵌套样本
             if isinstance(X, list) and len(X) == 1 and isinstance(X[0], (list, np.ndarray)):
@@ -903,8 +939,20 @@ class DeepSoundBaseRNN:
             # 模型预测（先获取概率再求标签）
             self.resource_logger.log(f"预测输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
+            
+            # 预测时监控资源使用
+            start_time = time.time()
+            process = psutil.Process(os.getpid())
+            start_memory = process.memory_info().rss / (1024**3)
+            
             y_pred_proba = self.model.predict(X, verbose=0)  # 概率形状：(样本数, 窗口数, 类别数)
             y_pred = y_pred_proba.argmax(axis=-1)  # 取概率最大的标签
+            
+            # 记录预测资源使用
+            end_time = time.time()
+            end_memory = process.memory_info().rss / (1024**3)
+            self.resource_logger.log(f"预测耗时: {end_time - start_time:.2f}秒")
+            self.resource_logger.log(f"预测内存使用变化: {start_memory:.2f} GB -> {end_memory:.2f} GB")
 
             # 打印预测概率与标签（前3个样本的前5个窗口）
             for i in range(min(3, len(y_pred))):
@@ -979,7 +1027,7 @@ class DeepSoundBaseRNN:
             raise
 
     def predict_proba(self, X: Union[List[np.ndarray], np.ndarray]) -> Union[List[np.ndarray], np.ndarray]:
-        """预测概率，返回裁剪填充后的真实音频结果"""
+        """预测概率，返回裁剪填充后的真实音频结果（保留代码一的维度处理）"""
         try:
             if self.max_seq_len is None:
                 raise RuntimeError("请先调用fit方法训练模型")
@@ -1125,7 +1173,7 @@ class DeepSoundBaseRNN:
 
 
 class DeepSound(DeepSoundBaseRNN):
-    """DeepSound模型，继承自RNN基础类"""
+    """DeepSound模型，继承自RNN基础类，采用代码二的模型构建方式"""
     def __init__(self,
                  batch_size: int = 5,  # 代码二默认值
                  input_size: int = 1800,
@@ -1144,4 +1192,85 @@ class DeepSound(DeepSoundBaseRNN):
             output_size=output_size,
             training_reshape=training_reshape,
             validation_split=validation_split
+        )
+        
+        # 初始化时不构建模型，在fit方法中构建（代码二思路）
+
+    def _build_model(self, output_size):
+        """构建模型结构，采用代码二的模型参数配置和构建方式"""
+        # 打印模型输出维度
+        self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={self.max_seq_len}")
+        
+        # 使用代码二的layers_config参数
+        layers_config = [
+            (32, 18, 3, activations.relu),
+            (32, 9, 1, activations.relu),
+            (128, 3, 1, activations.relu)
+        ]
+
+        # CNN子网络 - 用于特征提取
+        cnn = Sequential(name='cnn_subnetwork')
+        cnn.add(layers.Rescaling(scale=1./255, name='input_rescaling'))  # 代码二使用的缩放
+
+        for ix_l, layer in enumerate(layers_config):
+            # 第一个卷积块
+            cnn.add(layers.Conv1D(
+                layer[0],
+                kernel_size=layer[1],
+                strides=layer[2],
+                activation=layer[3],  # 代码二直接在这里设置激活函数
+                padding=self.padding,
+                data_format=self.data_format,
+                kernel_initializer=HeUniform(),
+                name=f'conv1d_{ix_l*2 + 1}'
+            ))
+
+            # 第二个卷积块
+            cnn.add(layers.Conv1D(
+                layer[0],
+                kernel_size=layer[1],
+                strides=layer[2],
+                activation=layer[3],  # 代码二直接在这里设置激活函数
+                padding=self.padding,
+                data_format=self.data_format,
+                kernel_initializer=HeUniform(),
+                name=f'conv1d_{ix_l*2 + 2}'
+            ))
+
+            # 除最后一层外添加Dropout
+            if ix_l < (len(layers_config) - 1):
+                cnn.add(layers.Dropout(rate=0.2, name=f'dropout_{ix_l + 1}'))  # 代码二使用0.2
+
+        cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
+        cnn.add(layers.Flatten(name='flatten'))
+        cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))  # 代码二使用0.2
+
+        # 使用代码二的FFN参数
+        ffn = Sequential(name='ffn_subnetwork')
+        ffn.add(layers.Dense(256, activation=activations.relu, kernel_initializer=HeUniform(), name='ffn_dense_1'))
+        ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_1'))  # 代码二使用0.2
+        ffn.add(layers.Dense(128, activation=activations.relu, kernel_initializer=HeUniform(), name='ffn_dense_2'))
+        ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_2'))  # 代码二使用0.2
+        ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
+
+        # 使用代码二的GRU参数
+        self.model = Sequential([
+            layers.InputLayer(input_shape=(None, self.input_size, 1), name='input1'),  # 代码二支持动态长度
+            layers.TimeDistributed(cnn, name='time_distributed_cnn'),
+            layers.Bidirectional(
+                layers.GRU(128,  # 代码二使用128
+                           activation="tanh", 
+                           return_sequences=True, 
+                           dropout=0.2,  # 代码二使用0.2
+                           kernel_initializer=HeUniform()),
+                name='bidirectional_gru'
+            ),
+            layers.TimeDistributed(ffn, name='time_distributed_ffn')
+        ])
+
+        # 代码二使用Adagrad优化器
+        self.model.compile(
+            optimizer=Adagrad(),
+            loss='sparse_categorical_crossentropy',
+            weighted_metrics=['accuracy']
         )
