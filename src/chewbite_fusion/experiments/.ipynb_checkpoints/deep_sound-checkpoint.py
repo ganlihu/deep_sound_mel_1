@@ -16,7 +16,7 @@ def get_model_instance(variable_params):
     # 核心修改：移除不被DeepSound接受的training_reshape参数，减小批次大小以降低显存占用
     return DeepSound(input_size=1800,
                      output_size=5,
-                     n_epochs=1,
+                     n_epochs=10,
                      batch_size=5,  # 重点调整：降低批次大小
                      set_sample_weights=True,
                      feature_scaling=True)

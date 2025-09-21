@@ -4,7 +4,6 @@ import time
 import numpy as np
 import tensorflow as tf
 import psutil
-import logging
 from datetime import datetime
 from typing import List, Tuple, Optional, Union, Dict
 try:
@@ -27,17 +26,12 @@ if gpus:
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.optimizers import Adagrad  # 保持代码二使用的优化器
+from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import activations
 from tensorflow.keras.initializers import HeUniform
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, CSVLogger
-# 假设NaNDetector的路径正确
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from chewbite_fusion.data.utils import NaNDetector
 import traceback
-
-# 初始化模块日志（采用代码二的日志配置）
-logger = logging.getLogger('yaer')
-logging.basicConfig(level=logging.INFO)
 
 
 class ResourceLogger:
@@ -58,7 +52,6 @@ class ResourceLogger:
         }
         self.initialized = False
         self.gpu_handles: List = []
-        self.used_devices: List[str] = []  # 记录使用的设备
         
         if pynvml_available:
             try:
@@ -74,8 +67,6 @@ class ResourceLogger:
         entry = f"[{timestamp}] {message}" if include_timestamp else message
         self.log_entries.append(entry)
         print(message)
-        # 同时输出到logging（代码二功能）
-        logger.info(message)
     
     def record_system_info(self) -> None:
         self.log("===== 系统基本信息 =====")
@@ -119,13 +110,6 @@ class ResourceLogger:
                 self.log(f"  总显存: {total_vram_gb:.2f} GB")
                 self.log(f"  初始可用显存: {available_vram_gb:.2f} GB")
                 self.memory_peaks['gpu_memory_used'][i] = 0.0
-        
-        # 记录可用计算设备
-        self.log("\n===== 可用计算设备 =====")
-        physical_devices = tf.config.list_physical_devices()
-        for device in physical_devices:
-            self.log(f"设备: {device.name}, 类型: {device.device_type}")
-            self.used_devices.append(device.name)
         
         self.log("========================\n")
     
@@ -191,11 +175,6 @@ class ResourceLogger:
                 except pynvml.NVMLError as e:
                     self.log(f"获取GPU {i} 内存信息失败: {e}")
         
-        # 记录实际使用的设备
-        self.log("\n===== 实际使用的设备 =====")
-        for device in self.used_devices:
-            self.log(f"设备: {device}")
-        
         self.log("=======================\n")
     
     def save_log(self) -> None:
@@ -220,78 +199,16 @@ class GPUUsageMonitor(keras.callbacks.Callback):
         self.interval = interval
         self.resource_logger = resource_logger or ResourceLogger()
         self.start_time = time.time()
-        self.batch_counter = 0
         
     def on_train_begin(self, logs=None) -> None:
         self.start_time = time.time()
         self.resource_logger.log("\n===== 系统资源监控初始化 =====")
         self.resource_logger.record_system_info()
-        
-        # 记录训练开始时使用的设备
-        self.log_used_devices()
-    
-    def log_used_devices(self):
-        """记录当前训练实际使用的设备"""
-        try:
-            # 获取当前模型使用的设备
-            used_devices = set()
-            for layer in self.model.layers:
-                for weight in layer.weights:
-                    device = weight.device
-                    if device:
-                        used_devices.add(device)
-            
-            self.resource_logger.log("\n===== 训练使用的设备 =====")
-            for device in used_devices:
-                self.resource_logger.log(f"使用设备: {device}")
-                if device not in self.resource_logger.used_devices:
-                    self.resource_logger.used_devices.append(device)
-            self.resource_logger.log("==========================\n")
-        except Exception as e:
-            self.resource_logger.log(f"记录使用设备时出错: {str(e)}")
     
     def on_train_batch_end(self, batch: int, logs=None) -> None:
-        self.batch_counter += 1
-        # 每N个批次记录一次资源使用情况，而不仅仅是更新峰值
-        if self.batch_counter % self.interval == 0:
+        if batch % self.interval == 0:
             self.resource_logger.update_memory_peaks(batch=batch)
-            self.log_batch_resource_usage(batch)
             
-    def log_batch_resource_usage(self, batch):
-        """记录当前批次的资源使用情况"""
-        self.resource_logger.log(f"\n===== Batch {batch} 资源使用统计 =====")
-        
-        cpu_percent = psutil.cpu_percent(interval=0.1)
-        mem = psutil.virtual_memory()
-        self.resource_logger.log(f"CPU使用率: {cpu_percent}%")
-        self.resource_logger.log(f"内存状态: "
-                               f"已用 {mem.used / (1024**3):.2f} GB / "
-                               f"总 {mem.total / (1024**3):.2f} GB / "
-                               f"可用 {mem.available / (1024**3):.2f} GB ({100 - mem.percent}%)")
-        
-        if pynvml_available and self.resource_logger.initialized:
-            for i, handle in enumerate(self.resource_logger.gpu_handles):
-                try:
-                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-                    used_vram = mem_info.used / (1024**3)
-                    total_vram = mem_info.total / (1024**3)
-                    available_vram = mem_info.free / (1024**3)
-                    
-                    self.resource_logger.log(
-                        f"GPU {i} 状态: "
-                        f"使用率 {util.gpu}%, "
-                        f"显存(已用/总/可用): {used_vram:.2f} / {total_vram:.2f} / {available_vram:.2f} GB, "
-                        f"温度 {temp}°C"
-                    )
-                except pynvml.NVMLError as e:
-                    self.resource_logger.log(f"GPU {i} 信息获取失败: {e}")
-        
-        process = psutil.Process(os.getpid())
-        self.resource_logger.log(f"当前进程内存使用: {process.memory_info().rss / (1024**3):.2f} GB")
-        self.resource_logger.log("=================================\n")
-    
     def on_epoch_end(self, epoch: int, logs=None) -> None:
         self.resource_logger.update_memory_peaks(epoch=epoch)
         self.resource_logger.log(f"\n===== Epoch {epoch} 资源使用统计 =====")
@@ -472,16 +389,14 @@ class GradientMonitor(keras.callbacks.Callback):
 
 
 class DeepSoundBaseRNN:
-    """RNN基础类，支持动态填充及多GPU训练，整合代码一和代码二功能"""
+    """RNN基础类，支持动态填充及多GPU训练"""
     def __init__(self,
-                 batch_size: int = 5,  # 代码二默认值
+                 batch_size: int = 8,
                  n_epochs: int = 1400,
                  input_size: int = 1800,
                  set_sample_weights: bool = True,
                  feature_scaling: bool = True,
-                 output_size: int = 4,  # 保留代码一的output_size参数
-                 training_reshape: bool = False,  # 代码二参数
-                 validation_split: float = 0.2):  # 代码二参数
+                 output_size: int = 4):  # 新增output_size参数
         self.classes_: Optional[List[int]] = None
         self.padding_class: Optional[int] = None  # 填充类别标记
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
@@ -492,7 +407,7 @@ class DeepSoundBaseRNN:
         self.batch_size = batch_size
         self.n_epochs = n_epochs
         self.data_format = 'channels_last'
-        self.padding = "valid"  # 代码二使用valid padding
+        self.padding = "same"
         self.set_sample_weights = set_sample_weights
         self.feature_scaling = feature_scaling
         self.model: Optional[keras.Model] = None
@@ -502,19 +417,104 @@ class DeepSoundBaseRNN:
         self.strategy: Optional[tf.distribute.Strategy] = None
         self.resource_logger = ResourceLogger()
         os.makedirs(self.model_save_path, exist_ok=True)
-        
-        # 代码二特有参数
-        self.training_reshape = training_reshape
-        self.validation_split = validation_split
-        self.ghost_dim = 2  # 代码二特有参数
-        self.feature_dim = 1  # 代码二特有参数
-        self.fold_index = 0  # 代码二用于多折训练的标识
 
-    def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray], fold_index=0) -> None:
-        """训练模型，整合代码二的功能"""
-        # 代码二功能：接收折数参数
-        self.fold_index = fold_index
+    def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
+        """构建模型结构，优化维度转换和正则化（减少显存占用）"""
+        # 打印模型输出维度
+        self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={max_seq_len}")
         
+        # 核心修改1：减少CNN卷积核数量，降低特征维度
+        layers_config = [
+            (16, 18, 3, activations.relu),  # 原32 -> 16
+            (16, 9, 1, activations.relu),   # 原32 -> 16
+            (32, 3, 1, activations.relu)    # 原64 -> 32
+        ]
+
+        # CNN子网络 - 用于特征提取
+        cnn = Sequential(name='cnn_subnetwork')
+        cnn.add(layers.Rescaling(scale=1.0, name='input_rescaling'))
+
+        for ix_l, layer in enumerate(layers_config):
+            # 第一个卷积块
+            cnn.add(layers.Conv1D(
+                layer[0],
+                kernel_size=layer[1],
+                strides=layer[2],
+                activation=None,
+                padding=self.padding,
+                data_format=self.data_format,
+                kernel_initializer=HeUniform(),
+                name=f'conv1d_{ix_l*2 + 1}'
+            ))
+            cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 1}'))
+            cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 1}'))
+
+            # 第二个卷积块
+            cnn.add(layers.Conv1D(
+                layer[0],
+                kernel_size=layer[1],
+                strides=layer[2],
+                activation=None,
+                padding=self.padding,
+                data_format=self.data_format,
+                kernel_initializer=HeUniform(),
+                name=f'conv1d_{ix_l*2 + 2}'
+            ))
+            cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 2}'))
+            cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 2}'))
+
+            # 除最后一层外添加Dropout
+            if ix_l < (len(layers_config) - 1):
+                cnn.add(layers.Dropout(rate=0.3, name=f'dropout_{ix_l + 1}'))
+
+        cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
+        cnn.add(layers.Flatten(name='flatten'))
+        cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))
+
+        # 核心修改2：减少FFN维度，降低参数数量
+        ffn = Sequential(name='ffn_subnetwork')
+        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))  # 原256 -> 128
+        ffn.add(layers.BatchNormalization(name='ffn_bn_1'))
+        ffn.add(layers.Activation(activations.relu, name='ffn_act_1'))
+        ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_1'))
+        
+        ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))   # 原128 -> 64
+        ffn.add(layers.BatchNormalization(name='ffn_bn_2'))
+        ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
+        ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
+        
+        ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
+
+        # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
+        model = Sequential([
+            layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
+            layers.TimeDistributed(cnn, name='time_distributed_cnn'),
+            layers.Bidirectional(
+                layers.GRU(64,  # 原128 -> 64
+                           activation="tanh", 
+                           return_sequences=True, 
+                           dropout=0.3,
+                           recurrent_dropout=0.2,
+                           kernel_initializer=HeUniform()),
+                name='bidirectional_gru'
+            ),
+            layers.TimeDistributed(ffn, name='time_distributed_ffn')
+        ])
+
+        model.compile(
+            optimizer=Adam(
+                learning_rate=1e-4,
+                clipnorm=1.0,
+                clipvalue=0.5
+            ),
+            loss='sparse_categorical_crossentropy',
+            weighted_metrics=['accuracy']
+        )
+
+        return model
+
+    def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray]) -> None:
+        """训练模型"""
         self.nan_detector = NaNDetector(verbose=True)
         training_start_time = time.time()
         try:
@@ -523,11 +523,6 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"原始X类型: {type(X)}, 长度: {len(X) if isinstance(X, (list, np.ndarray)) else 'N/A'}")
             self.resource_logger.log(f"原始y类型: {type(y)}, 长度: {len(y) if isinstance(y, (list, np.ndarray)) else 'N/A'}")
             self.resource_logger.log("="*60)
-            
-            # 代码二功能：确保X和y是列表
-            if not isinstance(X, list):
-                X = [X]
-                y = [y]
             
             # 提取嵌套样本
             if isinstance(X, list) and len(X) == 1 and isinstance(X[0], (list, np.ndarray)):
@@ -541,169 +536,142 @@ class DeepSoundBaseRNN:
             self.nan_detector.check_nan(X, "原始X数据")
             self.nan_detector.check_nan(y, "原始y数据")
             
-            # 处理样本，包含代码二的样本修复逻辑
-            shapes = []
-            valid_samples = []
-            valid_labels = []
-            
-            for i, (x_item, y_item) in enumerate(zip(X, y)):
-                try:
-                    if isinstance(x_item, list):
-                        try:
-                            x_arr = np.array(x_item, dtype='float32')
-                        except ValueError:
-                            processed = []
-                            for elem in x_item:
-                                if isinstance(elem, list):
-                                    elem = np.array(elem, dtype='float32')
-                                processed.append(elem)
-                            x_arr = np.array(processed, dtype='float32')
-                    
-                    elif isinstance(x_item, np.ndarray):
-                        x_arr = x_item.astype('float32')
-                    else:
-                        raise ValueError(f"不支持的特征数据类型: {type(x_item)}")
-
-                    if x_arr.ndim == 1:
-                        x_arr = x_arr.reshape(-1, 1)
-                    elif x_arr.ndim > 2:
-                        x_arr = x_arr.reshape(x_arr.shape[0], -1)
-                    
-                    shapes.append(x_arr.shape)
-                    valid_samples.append(x_arr)
-
-                    if y_item is None:
-                        y_arr = np.array([0], dtype=int)
-                    elif isinstance(y_item, list):
-                        cleaned = []
-                        for item in y_item:
-                            if item is not None:
-                                cleaned.append(item)
-                        if not cleaned:
-                            cleaned = [0]
-                        y_arr = np.array(cleaned, dtype=int)
-                    elif isinstance(y_item, np.ndarray):
-                        y_arr = y_item.astype(int)
-                    else:
-                        try:
-                            y_val = int(y_item)
-                            y_arr = np.array([y_val], dtype=int)
-                        except:
-                            y_arr = np.array([0], dtype=int)
-                    
-                    valid_labels.append(y_arr)
-
-                except Exception as e:
-                    # 代码二功能：样本强制修复逻辑
-                    self.resource_logger.log(f"样本 {i} 处理错误 - {str(e)}，尝试强制修复")
+            # 转换为NumPy数组
+            self.resource_logger.log("\n===== 转换样本为NumPy数组 =====")
+            X_array: List[np.ndarray] = []
+            self.original_lengths = []  # 重置并记录原始长度
+            for i, sample in enumerate(X):
+                if isinstance(sample, list):
                     try:
-                        if self.max_seq_len is not None:
-                            forced_x = np.full((self.max_seq_len, self.input_size), 
-                                              -100.0, dtype='float32')
-                        else:
-                            forced_x = np.full((100, self.input_size), -100.0, dtype='float32')
-                        valid_samples.append(forced_x)
-                        valid_labels.append(np.array([0], dtype=int))
-                        shapes.append(forced_x.shape)
-                        self.resource_logger.log(f"样本 {i} 已强制修复为默认形状")
-                    except:
-                        self.resource_logger.log(f"样本 {i} 无法修复，已跳过")
-                        continue
+                        sample_array = np.array(sample, dtype='float32')
+                        X_array.append(sample_array)
+                        self.original_lengths.append(len(sample_array))  # 记录原始长度
+                        self.resource_logger.log(f"样本{i}：已从list转换为数组，形状={sample_array.shape}，原始长度={len(sample_array)}")
+                    except ValueError as e:
+                        self.resource_logger.log(f"样本{i}：列表转换为数组失败！错误：{e}")
+                        raise
+                elif isinstance(sample, np.ndarray):
+                    X_array.append(sample)
+                    self.original_lengths.append(len(sample))  # 记录原始长度
+                    self.resource_logger.log(f"样本{i}：已是数组，形状={sample.shape}，原始长度={len(sample)}")
+                else:
+                    raise TypeError(f"样本{i}：既不是list也不是数组，类型={type(sample)}")
+            X = X_array
+            self.nan_detector.check_nan(X, "转换为数组后的X")
+            self.resource_logger.log("===========================\n")
             
-            # 处理空样本情况（代码二功能）
-            if not valid_samples:
-                self.resource_logger.log("所有样本都无效，使用默认数据继续")
-                self.max_seq_len = 100
-                self.feature_dim = self.input_size
-                valid_samples = [np.full((self.max_seq_len, self.feature_dim), -100.0, dtype='float32')]
-                valid_labels = [np.zeros(self.max_seq_len, dtype=int)]
+            # 统一样本维度
+            X = [
+                np.expand_dims(sample, axis=-1) if (isinstance(sample, np.ndarray) and sample.ndim == 1) 
+                else np.squeeze(sample, axis=-1) if (isinstance(sample, np.ndarray) and sample.ndim == 3 and sample.shape[-1] == 1)
+                else sample 
+                for sample in X
+            ]
+            self.nan_detector.check_nan(X, "统一维度后的X")
+            
+            # 计算最大序列长度
+            if isinstance(X, (list, np.ndarray)):
+                self.max_seq_len = max(len(sample) for sample in X) if X else 0
+                self.resource_logger.log(f"当前批次最长序列长度（窗口数）: {self.max_seq_len}")
             else:
-                self.max_seq_len = max(shape[0] for shape in shapes)
-                self.feature_dim = self.input_size
-                self.resource_logger.log(f"目标形状: 时间步={self.max_seq_len}, 特征维度={self.feature_dim}")
-            
-            # 处理X
-            processed_X = []
-            for x_arr in valid_samples:
-                if x_arr.shape[0] < self.max_seq_len:
-                    pad_length = self.max_seq_len - x_arr.shape[0]
-                    x_padded = np.pad(x_arr, 
-                                     pad_width=((0, pad_length), (0, 0)),
-                                     mode='constant', 
-                                     constant_values=-100.0)  # 代码二使用-100.0作为填充值
-                else:
-                    x_padded = x_arr[:self.max_seq_len, :]
+                raise ValueError("X必须是列表或NumPy数组")
 
-                if x_padded.shape[1] < self.feature_dim:
-                    pad_feat = self.feature_dim - x_padded.shape[1]
-                    x_padded = np.pad(x_padded,
-                                     pad_width=((0, 0), (0, pad_feat)),
-                                     mode='constant',
-                                     constant_values=-100.0)
-                else:
-                    x_padded = x_padded[:, :self.feature_dim]
-
-                processed_X.append(x_padded.reshape(1, self.max_seq_len, self.feature_dim, 1))
-
-            X = np.concatenate(processed_X, axis=0)
-            self.resource_logger.log(f"处理后特征形状: {X.shape}")
-            
-            # 处理y
-            processed_y = []
-            for y_arr in valid_labels:
-                if y_arr.ndim > 1:
-                    y_arr = y_arr.flatten()
+            # 同步填充X和y（均在末尾填充）
+            target_len = self.max_seq_len
+            X_padded: List[np.ndarray] = []
+            for sample in X:
+                if not isinstance(sample, np.ndarray) or sample.ndim != 2:
+                    raise ValueError(f"样本必须是2维数组，实际样本形状: {sample.shape if isinstance(sample, np.ndarray) else type(sample)}")
                 
-                if len(y_arr) < self.max_seq_len:
-                    pad_value = self.padding_class if self.padding_class is not None else 0
-                    y_padded = np.pad(y_arr,
-                                     pad_width=(0, self.max_seq_len - len(y_arr)),
-                                     mode='constant',
-                                     constant_values=pad_value)
-                else:
-                    y_padded = y_arr[:self.max_seq_len]
+                seq_len, feat_dim = sample.shape
+                # 统一特征维度
+                if feat_dim != self.input_size:
+                    self.resource_logger.log(f"样本特征维度不匹配: 实际{feat_dim}，预期{self.input_size}，自动调整")
+                    if feat_dim > self.input_size:
+                        sample = sample[:, :self.input_size]
+                    else:
+                        pad_width = ((0, 0), (0, self.input_size - feat_dim))
+                        sample = np.pad(sample, pad_width, mode='constant', constant_values=0.0)
                 
-                processed_y.append(y_padded.reshape(1, -1))
-
-            y = np.concatenate(processed_y, axis=0)
-            self.resource_logger.log(f"处理后标签形状: {y.shape}")
+                # 填充窗口数维度（右填-1.0，与y填充位置一致）
+                padded = keras.preprocessing.sequence.pad_sequences(
+                    sample.T,
+                    maxlen=target_len,
+                    padding='post',
+                    value=-1.0,
+                    dtype='float32'
+                ).T
+                X_padded.append(padded)
             
-            X = X.astype('float32')
-            y = y.astype('float32')
-
-            self.classes_ = list(set(np.ravel(y)))
-            if self.padding_class is None or self.padding_class not in self.classes_:
-                self.padding_class = len(self.classes_) if len(self.classes_) > 0 else 0
-
-            # 代码二功能：动态调整验证集比例
-            num_samples = X.shape[0]
-            actual_validation_split = self.validation_split
+            # 转换为数组
+            try:
+                X = np.array(X_padded, dtype='float32')
+            except ValueError as e:
+                self.resource_logger.log(f"转换为数组失败: {e}")
+                self.resource_logger.log("填充后样本形状:")
+                for i, p in enumerate(X_padded):
+                    self.resource_logger.log(f"样本{i}: {p.shape}")
+                raise
             
-            if num_samples < 5:
-                self.resource_logger.log(f"样本数量较少 ({num_samples}个)，自动调整验证集比例")
-                if num_samples == 1:
-                    actual_validation_split = 0.0
-                else:
-                    actual_validation_split = max(1/num_samples, min(0.1, self.validation_split))
-                self.resource_logger.log(f"调整后验证集比例: {actual_validation_split:.2f}")
+            self.nan_detector.check_nan(X, "X填充后的数组")
+            
+            # 添加通道维度
+            if X.ndim == 3:
+                X = np.expand_dims(X, axis=-1)
+            self.resource_logger.log(f"X填充后形状: {X.shape}")
+            self.nan_detector.check_nan(X, "添加通道维度后的X")
 
-            # 确定输出维度（使用初始化时传入的output_size，保留代码一的维度）
+            # 处理标签和填充类别
+            self.classes_ = list(set(np.concatenate(y))) if y and isinstance(y[0], (list, np.ndarray)) else []
+            self.padding_class = max(self.classes_) + 1 if self.classes_ else 0
+            
+            # 打印填充类别信息
+            self.resource_logger.log(f"训练标签中的类别: {self.classes_}")
+            self.resource_logger.log(f"填充类别编号（padding_class）: {self.padding_class}")
+            
+            # 填充标签（与X同步在末尾填充）
+            y_padded = keras.preprocessing.sequence.pad_sequences(
+                y,
+                maxlen=target_len,
+                padding='post',
+                value=self.padding_class,
+                dtype='int32'
+            )
+            y = y_padded
+            self.resource_logger.log(f"y填充后形状: {y.shape}")
+            self.nan_detector.check_nan(y, "y填充后的数据")
+
+            # 处理X的填充值（替换为均值）
+            non_pad_mask = X != -1.0
+            mean_val = 0.0
+            if np.any(non_pad_mask):
+                mean_val = np.mean(X[non_pad_mask])
+                X[~non_pad_mask] = mean_val
+                self.resource_logger.log(f"X填充值替换为均值: {mean_val:.4f}")
+                self.nan_detector.check_nan(X, "替换填充值后的X")
+            else:
+                self.resource_logger.log("警告：所有值都是填充值，可能数据异常")
+
+            # 特征标准化
+            if self.feature_scaling and np.any(non_pad_mask):
+                mean = np.mean(X[non_pad_mask])
+                std = np.std(X[non_pad_mask])
+                X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
+                self.resource_logger.log(f"标准化后X统计: min={np.min(X):.4f}, max={np.max(X):.4f}")
+                self.nan_detector.check_nan(X, "标准化后的X")
+
+            # 确定输出维度（使用初始化时传入的output_size）
             output_size = self.output_size
             
-            # 分布式训练设置（保留代码一的功能）
-            try:
-                self.strategy = tf.distribute.MirroredStrategy()
-                self.resource_logger.log(f"已检测到 {self.strategy.num_replicas_in_sync} 个GPU，将用于分布式训练")
-            except tf.errors.UnavailableError:
-                self.resource_logger.log("无法初始化分布式策略，将使用单设备训练")
-                self.strategy = tf.distribute.get_strategy()  # 默认策略
+            # 分布式训练设置
+            self.strategy = tf.distribute.MirroredStrategy()
+            self.resource_logger.log(f"已检测到 {self.strategy.num_replicas_in_sync} 个GPU，将用于分布式训练")
             
             with self.strategy.scope():
-                # 构建模型（采用代码二的模型构建方式）
-                self._build_model(output_size)
+                self.model = self._build_model(max_seq_len=self.max_seq_len, output_size=output_size)
             
             self.weights_ = copy.deepcopy(self.model.get_weights())
-            self.resource_logger.log("\n模型初始化完成，结构如下：")
+            self.resource_logger.log("\n模型初始化完成（多GPU支持），结构如下：")
             self.model.summary(print_fn=self.resource_logger.log)
 
             # 准备监控批次
@@ -716,21 +684,13 @@ class DeepSoundBaseRNN:
             self.nan_detector.check_nan(monitor_y, "监控批次y数据")
 
             # 验证集设置
-            use_validation = actual_validation_split > 0
+            use_validation = X.shape[0] >= 5
+            validation_split = 0.2 if use_validation else 0.0
             monitor_loss = 'val_loss' if use_validation else 'loss'
             monitor_acc = 'val_accuracy' if use_validation else 'accuracy'
-            self.resource_logger.log(f"使用验证集: {use_validation}, 验证比例: {actual_validation_split}")
+            self.resource_logger.log(f"使用验证集: {use_validation}, 验证比例: {validation_split}")
 
-            # 代码二功能：创建训练结果目录
-            os.makedirs("training_results", exist_ok=True)
-            
-            # 代码二功能：配置CSV日志回调
-            csv_logger = CSVLogger(
-                f"training_results/fold_{self.fold_index + 1}_metrics.csv",
-                append=False
-            )
-
-            # 回调函数（整合两者的回调）
+            # 回调函数
             model_callbacks = [
                 EarlyStopping(patience=50, restore_best_weights=True, monitor=monitor_loss),
                 ModelCheckpoint(
@@ -754,8 +714,7 @@ class DeepSoundBaseRNN:
                     strategy=self.strategy,
                     resource_logger=self.resource_logger
                 ),
-                GPUUsageMonitor(interval=10, resource_logger=self.resource_logger),
-                csv_logger  # 代码二的CSV日志回调
+                GPUUsageMonitor(interval=10, resource_logger=self.resource_logger)
             ]
 
             # 样本权重（填充部分权重为0）
@@ -767,43 +726,18 @@ class DeepSoundBaseRNN:
                 self.nan_detector.check_nan(sample_weights, "样本权重")
 
             # 开始训练
-            self.resource_logger.log(f"\n【开始训练】样本数: {X.shape[0]}, 批次大小: {self.batch_size}, "
-                                   f"使用设备数量: {self.strategy.num_replicas_in_sync}")
-            
-            # 添加分布式训练的稳定性处理
-            try:
-                history = self.model.fit(
-                    x=X,
-                    y=y,
-                    epochs=self.n_epochs,
-                    verbose=1,
-                    batch_size=self.batch_size,
-                    validation_split=actual_validation_split,
-                    shuffle=True,
-                    sample_weight=sample_weights,
-                    callbacks=model_callbacks
-                )
-            except tf.errors.CancelledError as e:
-                self.resource_logger.log(f"训练过程中发生分布式通信错误: {str(e)}")
-                self.resource_logger.log("尝试使用单设备模式重新训练...")
-                
-                # 切换到单设备模式
-                self.strategy = tf.distribute.get_strategy()  # 默认单设备策略
-                with self.strategy.scope():
-                    self._build_model(output_size)
-                    
-                # 重新训练
-                history = self.model.fit(
-                    x=X,
-                    y=y,
-                    epochs=self.n_epochs,
-                    verbose=1,
-                    batch_size=self.batch_size,
-                    validation_split=actual_validation_split,
-                    shuffle=True,
-                    sample_weight=sample_weights,
-                    callbacks=model_callbacks
-                )
+            self.resource_logger.log(f"\n【开始训练】样本数: {X.shape[0]}, 批次大小: {self.batch_size}, GPU数量: {self.strategy.num_replicas_in_sync}")
+            history = self.model.fit(
+                x=X,
+                y=y,
+                epochs=self.n_epochs,
+                verbose=1,
+                batch_size=self.batch_size,
+                validation_split=validation_split,
+                shuffle=True,
+                sample_weight=sample_weights,
+                callbacks=model_callbacks
+            )
 
             # 训练总结
             training_time = time.time() - training_start_time
@@ -812,8 +746,7 @@ class DeepSoundBaseRNN:
                 "实际训练轮次": str(len(history.history['loss'])),
                 "最终训练损失": f"{history.history['loss'][-1]:.4f}",
                 "最终训练准确率": f"{history.history['accuracy'][-1]:.4f}",
-                "总训练时间": f"{training_time:.2f}秒",
-                "使用设备数量": str(self.strategy.num_replicas_in_sync)
+                "总训练时间": f"{training_time:.2f}秒"
             }
             
             if use_validation:
@@ -835,23 +768,18 @@ class DeepSoundBaseRNN:
             self.resource_logger.save_log()
 
     def predict(self, X: Union[List[np.ndarray], np.ndarray], aggregate: bool = False) -> Union[List[np.ndarray], np.ndarray]:
-        """模型预测，返回裁剪填充后的真实音频结果（保留代码一的维度处理）"""
+        """模型预测，返回裁剪填充后的真实音频结果
+        Args:
+            X: 输入数据
+            aggregate: 是否聚合序列结果（每个样本返回一个标签），True时返回一维数组，False时返回原始序列
+                       默认值改为False，直接返回窗口级预测
+        """
         try:
             if self.max_seq_len is None:
                 raise RuntimeError("请先调用fit方法训练模型")
             
             pred_detector = NaNDetector(verbose=True)
             self.resource_logger.log("\n===== 开始预测 =====")
-            
-            # 记录预测时使用的设备
-            self.resource_logger.log("预测使用的设备:")
-            try:
-                for layer in self.model.layers:
-                    for weight in layer.weights:
-                        if weight.device:
-                            self.resource_logger.log(f"  {weight.name} 在 {weight.device} 上")
-            except Exception as e:
-                self.resource_logger.log(f"记录预测设备时出错: {str(e)}")
             
             # 提取嵌套样本
             if isinstance(X, list) and len(X) == 1 and isinstance(X[0], (list, np.ndarray)):
@@ -905,12 +833,12 @@ class DeepSoundBaseRNN:
                     else:
                         sample = np.pad(sample, ((0,0), (0, self.input_size-feat_dim)), mode='constant')
                 
-                # 填充窗口数维度（与训练时一致：右填-100.0，代码二的填充值）
+                # 填充窗口数维度（与训练时一致：右填-1.0）
                 padded = keras.preprocessing.sequence.pad_sequences(
                     sample.T,
                     maxlen=self.max_seq_len,  # 使用训练时的最大长度
                     padding='post',           # 与训练时一致
-                    value=-100.0,             # 代码二使用-100.0
+                    value=-1.0,               # 与训练时一致
                     dtype='float32'
                 ).T
                 X_padded.append(padded)
@@ -923,7 +851,7 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"填充后X形状: {X.shape}")
             
             # 标准化（与训练时一致）
-            non_pad_mask = X != -100.0  # 对应代码二的填充值
+            non_pad_mask = X != -1.0
             if np.any(non_pad_mask):
                 mean_val = np.mean(X[non_pad_mask])
                 X[~non_pad_mask] = mean_val
@@ -932,27 +860,11 @@ class DeepSoundBaseRNN:
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 pred_detector.check_nan(X, "预测：标准化后")
             
-            # 代码二功能：特征缩放
-            if self.feature_scaling:
-                X = (X + 1.0) * 100
-            
             # 模型预测（先获取概率再求标签）
             self.resource_logger.log(f"预测输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
-            
-            # 预测时监控资源使用
-            start_time = time.time()
-            process = psutil.Process(os.getpid())
-            start_memory = process.memory_info().rss / (1024**3)
-            
             y_pred_proba = self.model.predict(X, verbose=0)  # 概率形状：(样本数, 窗口数, 类别数)
             y_pred = y_pred_proba.argmax(axis=-1)  # 取概率最大的标签
-            
-            # 记录预测资源使用
-            end_time = time.time()
-            end_memory = process.memory_info().rss / (1024**3)
-            self.resource_logger.log(f"预测耗时: {end_time - start_time:.2f}秒")
-            self.resource_logger.log(f"预测内存使用变化: {start_memory:.2f} GB -> {end_memory:.2f} GB")
 
             # 打印预测概率与标签（前3个样本的前5个窗口）
             for i in range(min(3, len(y_pred))):
@@ -1027,7 +939,7 @@ class DeepSoundBaseRNN:
             raise
 
     def predict_proba(self, X: Union[List[np.ndarray], np.ndarray]) -> Union[List[np.ndarray], np.ndarray]:
-        """预测概率，返回裁剪填充后的真实音频结果（保留代码一的维度处理）"""
+        """预测概率，返回裁剪填充后的真实音频结果"""
         try:
             if self.max_seq_len is None:
                 raise RuntimeError("请先调用fit方法训练模型")
@@ -1088,7 +1000,7 @@ class DeepSoundBaseRNN:
                     sample.T,
                     maxlen=self.max_seq_len,
                     padding='post',
-                    value=-100.0,  # 代码二使用-100.0
+                    value=-1.0,
                     dtype='float32'
                 ).T
                 X_padded.append(padded)
@@ -1100,7 +1012,7 @@ class DeepSoundBaseRNN:
             pred_detector.check_nan(X, "预测概率：填充后")
             
             # 标准化
-            non_pad_mask = X != -100.0  # 代码二使用-100.0
+            non_pad_mask = X != -1.0
             if np.any(non_pad_mask):
                 mean_val = np.mean(X[non_pad_mask])
                 X[~non_pad_mask] = mean_val
@@ -1108,10 +1020,6 @@ class DeepSoundBaseRNN:
                 std = np.std(X[non_pad_mask])
                 X[non_pad_mask] = (X[non_pad_mask] - mean) / (std + 1e-8)
                 pred_detector.check_nan(X, "预测概率：标准化后")
-            
-            # 代码二功能：特征缩放
-            if self.feature_scaling:
-                X = (X + 1.0) * 100
             
             # 预测概率
             self.resource_logger.log(f"预测概率输入形状: {X.shape}")
@@ -1133,32 +1041,28 @@ class DeepSoundBaseRNN:
             raise
 
     def _get_samples_weights(self, y: np.ndarray) -> np.ndarray:
-        """计算样本权重，填充类别权重为0，使用代码二的实现"""
+        """计算样本权重，填充类别权重为0"""
         unique_classes, counts = np.unique(np.ravel(y), return_counts=True)
-        valid_mask = unique_classes != self.padding_class
-        valid_counts = counts[valid_mask]
+        counts = np.maximum(counts, 1)  # 避免除以0
         
-        if len(valid_counts) == 0:
-            return np.ones_like(y, dtype=float)
+        # 计算类别权重（平衡类别）
+        class_weight = np.log((counts.max() / counts) + 1.0)
         
-        max_count = valid_counts.max()
-        class_weight = {}
-        for cls, cnt in zip(unique_classes, counts):
-            if cls == self.padding_class:
-                class_weight[cls] = 0.0
-            else:
-                class_weight[cls] = max_count / cnt
+        # 填充类别权重设为0（核心：忽略填充部分的影响）
+        if self.padding_class in unique_classes:
+            pad_idx = np.where(unique_classes == self.padding_class)[0][0]
+            class_weight[pad_idx] = 0.0
         
         # 日志输出
         self.resource_logger.log("\n===== 类别权重 =====")
-        for cls, cnt, weight in zip(unique_classes, counts, class_weight.values()):
+        for cls, cnt, weight in zip(unique_classes, counts, class_weight):
             cls_type = "填充类别" if cls == self.padding_class else "普通类别"
             self.resource_logger.log(f"类别 {cls} ({cls_type}): 样本数={cnt}, 权重={weight:.4f}")
         self.resource_logger.log("====================\n")
 
         # 生成样本权重矩阵
         sample_weight = np.zeros_like(y, dtype=float)
-        for class_num, weight in class_weight.items():
+        for class_num, weight in zip(unique_classes, class_weight):
             sample_weight[y == class_num] = weight
 
         return sample_weight
@@ -1173,104 +1077,21 @@ class DeepSoundBaseRNN:
 
 
 class DeepSound(DeepSoundBaseRNN):
-    """DeepSound模型，继承自RNN基础类，采用代码二的模型构建方式"""
+    """DeepSound模型，继承自RNN基础类"""
     def __init__(self,
-                 batch_size: int = 5,  # 代码二默认值
-                 input_size: int = 1800,
-                 output_size: int = 5,  # 代码二默认值
-                 n_epochs: int = 1500,  # 代码二默认值
-                 training_reshape: bool = True,  # 代码二默认值
+                 batch_size: int = 5,
+                 input_size: int = 4000,
+                 output_size: int = 3,  # 接收动态输出维度
+                 n_epochs: int = 1400,
+                 training_reshape: bool = False,
                  set_sample_weights: bool = True,
-                 feature_scaling: bool = True,
-                 validation_split: float = 0.2):  # 代码二参数
+                 feature_scaling: bool = True):
         super().__init__(
             batch_size=batch_size,
             n_epochs=n_epochs,
             input_size=input_size,
             set_sample_weights=set_sample_weights,
             feature_scaling=feature_scaling,
-            output_size=output_size,
-            training_reshape=training_reshape,
-            validation_split=validation_split
+            output_size=output_size  # 传递输出维度到父类
         )
-        
-        # 初始化时不构建模型，在fit方法中构建（代码二思路）
-
-    def _build_model(self, output_size):
-        """构建模型结构，采用代码二的模型参数配置和构建方式"""
-        # 打印模型输出维度
-        self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={self.max_seq_len}")
-        
-        # 使用代码二的layers_config参数
-        layers_config = [
-            (32, 18, 3, activations.relu),
-            (32, 9, 1, activations.relu),
-            (128, 3, 1, activations.relu)
-        ]
-
-        # CNN子网络 - 用于特征提取
-        cnn = Sequential(name='cnn_subnetwork')
-        cnn.add(layers.Rescaling(scale=1./255, name='input_rescaling'))  # 代码二使用的缩放
-
-        for ix_l, layer in enumerate(layers_config):
-            # 第一个卷积块
-            cnn.add(layers.Conv1D(
-                layer[0],
-                kernel_size=layer[1],
-                strides=layer[2],
-                activation=layer[3],  # 代码二直接在这里设置激活函数
-                padding=self.padding,
-                data_format=self.data_format,
-                kernel_initializer=HeUniform(),
-                name=f'conv1d_{ix_l*2 + 1}'
-            ))
-
-            # 第二个卷积块
-            cnn.add(layers.Conv1D(
-                layer[0],
-                kernel_size=layer[1],
-                strides=layer[2],
-                activation=layer[3],  # 代码二直接在这里设置激活函数
-                padding=self.padding,
-                data_format=self.data_format,
-                kernel_initializer=HeUniform(),
-                name=f'conv1d_{ix_l*2 + 2}'
-            ))
-
-            # 除最后一层外添加Dropout
-            if ix_l < (len(layers_config) - 1):
-                cnn.add(layers.Dropout(rate=0.2, name=f'dropout_{ix_l + 1}'))  # 代码二使用0.2
-
-        cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
-        cnn.add(layers.Flatten(name='flatten'))
-        cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))  # 代码二使用0.2
-
-        # 使用代码二的FFN参数
-        ffn = Sequential(name='ffn_subnetwork')
-        ffn.add(layers.Dense(256, activation=activations.relu, kernel_initializer=HeUniform(), name='ffn_dense_1'))
-        ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_1'))  # 代码二使用0.2
-        ffn.add(layers.Dense(128, activation=activations.relu, kernel_initializer=HeUniform(), name='ffn_dense_2'))
-        ffn.add(layers.Dropout(rate=0.2, name='ffn_dropout_2'))  # 代码二使用0.2
-        ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
-
-        # 使用代码二的GRU参数
-        self.model = Sequential([
-            layers.InputLayer(input_shape=(None, self.input_size, 1), name='input1'),  # 代码二支持动态长度
-            layers.TimeDistributed(cnn, name='time_distributed_cnn'),
-            layers.Bidirectional(
-                layers.GRU(128,  # 代码二使用128
-                           activation="tanh", 
-                           return_sequences=True, 
-                           dropout=0.2,  # 代码二使用0.2
-                           kernel_initializer=HeUniform()),
-                name='bidirectional_gru'
-            ),
-            layers.TimeDistributed(ffn, name='time_distributed_ffn')
-        ])
-
-        # 代码二使用Adagrad优化器
-        self.model.compile(
-            optimizer=Adagrad(),
-            loss='sparse_categorical_crossentropy',
-            weighted_metrics=['accuracy']
-        )
+        self.training_reshape = training_reshape
