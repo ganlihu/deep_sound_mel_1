@@ -396,7 +396,8 @@ class DeepSoundBaseRNN:
                  input_size: int = 1800,
                  set_sample_weights: bool = True,
                  feature_scaling: bool = True,
-                 output_size: int = 4):  # 新增output_size参数
+                 output_size: int = 4,
+                 gpus: List[int] = [0]):  # 新增GPU列表参数
         self.classes_: Optional[List[int]] = None
         self.padding_class: Optional[int] = None  # 填充类别标记
         self.max_seq_len: Optional[int] = None    # 训练时的最大序列长度
@@ -407,7 +408,7 @@ class DeepSoundBaseRNN:
         self.batch_size = batch_size
         self.n_epochs = n_epochs
         self.data_format = 'channels_last'
-        self.padding = "same"
+        self.padding = "valid"
         self.set_sample_weights = set_sample_weights
         self.feature_scaling = feature_scaling
         self.model: Optional[keras.Model] = None
@@ -418,100 +419,112 @@ class DeepSoundBaseRNN:
         self.resource_logger = ResourceLogger()
         os.makedirs(self.model_save_path, exist_ok=True)
 
+        # 配置多GPU策略
+        self.gpus = gpus
+        if len(gpus) > 1:
+            devices = [f"/gpu:{i}" for i in gpus]
+            self.strategy = tf.distribute.MirroredStrategy(devices=devices)
+            self.resource_logger.log(f"已初始化多GPU策略，使用设备: {devices}")
+        else:
+            self.strategy = tf.distribute.get_strategy()  # 默认单GPU策略
+            self.resource_logger.log("使用默认单GPU策略")
+
     def _build_model(self, max_seq_len: int, output_size: int = 4) -> keras.Model:
         """构建模型结构，优化维度转换和正则化（减少显存占用）"""
         # 打印模型输出维度
         self.resource_logger.log(f"模型构建 - 输出维度output_size={output_size}，最大序列长度max_seq_len={max_seq_len}")
         
-        # 核心修改1：减少CNN卷积核数量，降低特征维度
-        layers_config = [
-            (16, 18, 3, activations.relu),  # 原32 -> 16
-            (16, 9, 1, activations.relu),   # 原32 -> 16
-            (32, 3, 1, activations.relu)    # 原64 -> 32
-        ]
+        # 在策略作用域内构建模型
+        with self.strategy.scope():
+            # 核心修改1：减少CNN卷积核数量，降低特征维度
+            layers_config = [
+                (32, 18, 3, activations.relu),
+                (16, 9, 1, activations.relu),
+                (64, 3, 1, activations.relu)
+            ]
 
-        # CNN子网络 - 用于特征提取
-        cnn = Sequential(name='cnn_subnetwork')
-        cnn.add(layers.Rescaling(scale=1.0, name='input_rescaling'))
+            # CNN子网络 - 用于特征提取
+            cnn = Sequential(name='cnn_subnetwork')
+            cnn.add(layers.Rescaling(scale=1.0, name='input_rescaling'))
 
-        for ix_l, layer in enumerate(layers_config):
-            # 第一个卷积块
-            cnn.add(layers.Conv1D(
-                layer[0],
-                kernel_size=layer[1],
-                strides=layer[2],
-                activation=None,
-                padding=self.padding,
-                data_format=self.data_format,
-                kernel_initializer=HeUniform(),
-                name=f'conv1d_{ix_l*2 + 1}'
-            ))
-            cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 1}'))
-            cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 1}'))
+            for ix_l, layer in enumerate(layers_config):
+                # 第一个卷积块
+                cnn.add(layers.Conv1D(
+                    layer[0],
+                    kernel_size=layer[1],
+                    strides=layer[2],
+                    activation=None,
+                    padding=self.padding,
+                    data_format=self.data_format,
+                    kernel_initializer=HeUniform(),
+                    name=f'conv1d_{ix_l*2 + 1}'
+                ))
+                cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 1}'))
+                cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 1}'))
 
-            # 第二个卷积块
-            cnn.add(layers.Conv1D(
-                layer[0],
-                kernel_size=layer[1],
-                strides=layer[2],
-                activation=None,
-                padding=self.padding,
-                data_format=self.data_format,
-                kernel_initializer=HeUniform(),
-                name=f'conv1d_{ix_l*2 + 2}'
-            ))
-            cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 2}'))
-            cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 2}'))
+                # 第二个卷积块
+                cnn.add(layers.Conv1D(
+                    layer[0],
+                    kernel_size=layer[1],
+                    strides=layer[2],
+                    activation=None,
+                    padding=self.padding,
+                    data_format=self.data_format,
+                    kernel_initializer=HeUniform(),
+                    name=f'conv1d_{ix_l*2 + 2}'
+                ))
+                cnn.add(layers.BatchNormalization(name=f'bn_{ix_l*2 + 2}'))
+                cnn.add(layers.Activation(layer[3], name=f'act_{ix_l*2 + 2}'))
 
-            # 除最后一层外添加Dropout
-            if ix_l < (len(layers_config) - 1):
-                cnn.add(layers.Dropout(rate=0.3, name=f'dropout_{ix_l + 1}'))
+                # 除最后一层外添加Dropout
+                if ix_l < (len(layers_config) - 1):
+                    cnn.add(layers.Dropout(rate=0.3, name=f'dropout_{ix_l + 1}'))
 
-        cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
-        cnn.add(layers.Flatten(name='flatten'))
-        cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))
+            cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
+            cnn.add(layers.Flatten(name='flatten'))
+            cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))
 
-        # 核心修改2：减少FFN维度，降低参数数量
-        ffn = Sequential(name='ffn_subnetwork')
-        ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))  # 原256 -> 128
-        ffn.add(layers.BatchNormalization(name='ffn_bn_1'))
-        ffn.add(layers.Activation(activations.relu, name='ffn_act_1'))
-        ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_1'))
-        
-        ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))   # 原128 -> 64
-        ffn.add(layers.BatchNormalization(name='ffn_bn_2'))
-        ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
-        ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
-        
-        ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
+            # 核心修改2：减少FFN维度，降低参数数量
+            ffn = Sequential(name='ffn_subnetwork')
+            ffn.add(layers.Dense(128, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_1'))
+            ffn.add(layers.BatchNormalization(name='ffn_bn_1'))
+            ffn.add(layers.Activation(activations.relu, name='ffn_act_1'))
+            ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_1'))
+            
+            ffn.add(layers.Dense(64, activation=None, kernel_initializer=HeUniform(), name='ffn_dense_2'))
+            ffn.add(layers.BatchNormalization(name='ffn_bn_2'))
+            ffn.add(layers.Activation(activations.relu, name='ffn_act_2'))
+            ffn.add(layers.Dropout(rate=0.3, name='ffn_dropout_2'))
+            
+            ffn.add(layers.Dense(output_size, activation=activations.softmax, name='ffn_output'))
 
-        # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
-        model = Sequential([
-            layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
-            layers.TimeDistributed(cnn, name='time_distributed_cnn'),
-            layers.Bidirectional(
-                layers.GRU(64,  # 原128 -> 64
-                           activation="tanh", 
-                           return_sequences=True, 
-                           dropout=0.3,
-                           recurrent_dropout=0.2,
-                           kernel_initializer=HeUniform()),
-                name='bidirectional_gru'
-            ),
-            layers.TimeDistributed(ffn, name='time_distributed_ffn')
-        ])
+            # 核心修改3：减少GRU隐藏层维度，降低序列特征维度
+            model = Sequential([
+                layers.InputLayer(input_shape=(max_seq_len, self.input_size, 1), name='input1'),
+                layers.TimeDistributed(cnn, name='time_distributed_cnn'),
+                layers.Bidirectional(
+                    layers.GRU(128,
+                               activation="tanh", 
+                               return_sequences=True, 
+                               dropout=0.3,
+                               recurrent_dropout=0.2,
+                               kernel_initializer=HeUniform()),
+                    name='bidirectional_gru'
+                ),
+                layers.TimeDistributed(ffn, name='time_distributed_ffn')
+            ])
 
-        model.compile(
-            optimizer=Adam(
-                learning_rate=1e-4,
-                clipnorm=1.0,
-                clipvalue=0.5
-            ),
-            loss='sparse_categorical_crossentropy',
-            weighted_metrics=['accuracy']
-        )
+            model.compile(
+                optimizer=Adam(
+                    learning_rate=1e-2,
+                    clipnorm=1.0,
+                    clipvalue=0.5
+                ),
+                loss='sparse_categorical_crossentropy',
+                weighted_metrics=['accuracy']
+            )
 
-        return model
+            return model
 
     def fit(self, X: Union[List[np.ndarray], np.ndarray], y: Union[List[np.ndarray], np.ndarray]) -> None:
         """训练模型"""
@@ -673,12 +686,8 @@ class DeepSoundBaseRNN:
             # 确定输出维度（使用初始化时传入的output_size）
             output_size = self.output_size
             
-            # 分布式训练设置
-            self.strategy = tf.distribute.MirroredStrategy()
-            self.resource_logger.log(f"已检测到 {self.strategy.num_replicas_in_sync} 个GPU，将用于分布式训练")
-            
-            with self.strategy.scope():
-                self.model = self._build_model(max_seq_len=self.max_seq_len, output_size=output_size)
+            # 构建模型（已在_strategy.scope()中处理）
+            self.model = self._build_model(max_seq_len=self.max_seq_len, output_size=output_size)
             
             self.weights_ = copy.deepcopy(self.model.get_weights())
             self.resource_logger.log("\n模型初始化完成（多GPU支持），结构如下：")
@@ -1138,13 +1147,15 @@ class DeepSound(DeepSoundBaseRNN):
                  n_epochs: int = 1400,
                  training_reshape: bool = False,
                  set_sample_weights: bool = True,
-                 feature_scaling: bool = True):
+                 feature_scaling: bool = True,
+                 gpus: List[int] = [0]):  # 新增GPU列表参数
         super().__init__(
             batch_size=batch_size,
             n_epochs=n_epochs,
             input_size=input_size,
             set_sample_weights=set_sample_weights,
             feature_scaling=feature_scaling,
-            output_size=output_size  # 传递输出维度到父类
+            output_size=output_size,
+            gpus=gpus  # 传递GPU参数到父类
         )
         self.training_reshape = training_reshape
