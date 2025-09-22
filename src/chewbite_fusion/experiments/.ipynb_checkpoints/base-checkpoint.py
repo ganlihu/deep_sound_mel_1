@@ -73,10 +73,13 @@ class Experiment:
         self.train_validation_segments = []
         self.quantization = quantization
         self.data_augmentation = data_augmentation
+        self.max_window_length = 0  # 新增：训练集最大窗口长度
 
         # 创建实验路径
         self.path = os.path.join(settings.experiments_path, name, self.timestamp)
         os.makedirs(self.path, exist_ok=True)
+        self.models_dir = os.path.join(self.path, "trained_models")
+        os.makedirs(self.models_dir, exist_ok=True)
 
         # 配置日志（同时输出到文件和控制台，捕获所有输出）
         logger.handlers = []  # 清空现有处理器
@@ -120,6 +123,25 @@ class Experiment:
         except:
             pass
 
+    def calculate_max_window_length(self):
+        '''计算训练集中所有样本的最大窗口长度，用于统一对齐'''
+        all_window_lengths = []
+        # 遍历训练验证片段的真实标签窗口长度
+        for key in self.X.keys():
+            seg_id = int(key.split('_')[1])
+            if seg_id in self.train_validation_segments:  # 仅考虑训练集样本
+                if self.manage_sequences:
+                    window_len = len(self.y[key])  # 每个样本的窗口数
+                    all_window_lengths.append(window_len)
+                    logger.debug(f"片段 {key} 窗口长度: {window_len}")
+        
+        if all_window_lengths:
+            self.max_window_length = max(all_window_lengths)
+            logger.info(f"训练集最大窗口长度确定为: {self.max_window_length}")
+        else:
+            logger.warning("未找到训练集样本，无法计算最大窗口长度")
+            self.max_window_length = 0
+
     def run(self):
         ''' 运行实验并保存相关信息 '''
         try:
@@ -144,6 +166,8 @@ class Experiment:
             }
 
             self.train_validation_segments = [seg for fold in folds.values() for seg in fold]
+            # 计算训练集最大窗口长度（关键新增步骤）
+            self.calculate_max_window_length()
 
             # 记录训练验证片段信息
             logger.info('train_validation_segments count: %d', len(self.train_validation_segments))
@@ -197,8 +221,7 @@ class Experiment:
 
     def execute_kfoldcv(self, folds, is_grid_search, parameters_combination):
         ''' 使用特定参数执行k折交叉验证 '''
-        signal_predictions = {}
-
+        fold_metrics = []
         for ix_fold, fold in folds.items():
             logger.info('Running fold number %s.', ix_fold)
 
@@ -338,39 +361,68 @@ class Experiment:
                     funnel.model.model.layers[ix_layer].set_weights(w)
                 logger.info(f'量化处理已应用，类型：{str(self.quantization)}')
 
+            # 初始化当前折的预测结果字典
+            current_fold_predictions = {}
+            
+            # 初始化列表用于收集当前折的真实标签和预测结果
+            y_true_all = []
+            y_pred_all = []
+
             # 模型预测
+            logger.info(f"当前折测试样本总数: {len(test_fold_keys)}，编号: {test_fold_keys}")
             for test_signal_key in test_fold_keys:
-                X_test = [self.X[test_signal_key]] if self.manage_sequences else self.X[test_signal_key]
-                y_signal_pred = funnel.predict(X_test)
+                # 获取测试数据片段
+                X_test_segment = [self.X[test_signal_key]] if self.manage_sequences else self.X[test_signal_key]
+                y_test_segment = self.y[test_signal_key]
 
-                # 检查预测结果异常
-                pred_flat = np.ravel(y_signal_pred[0]) if self.manage_sequences else y_signal_pred.flatten()
-                unique_pred, counts_pred = np.unique(pred_flat, return_counts=True)
-                pred_dist = dict(zip(unique_pred, counts_pred))
-                logger.info(f"测试片段 {test_signal_key} 预测类别分布：{pred_dist}")
+                # 模型预测
+                y_pred_segment = funnel.predict(X_test_segment)
 
-                # 检查异常类别
-                max_expected = len(self.target_encoder.classes_) - 1
-                invalid_preds = [p for p in unique_pred if p > max_expected]
-                if invalid_preds:
-                    for p in invalid_preds:
-                        count = counts_pred[unique_pred == p][0]
-                        logger.warning(f"测试片段 {test_signal_key} 发现异常类别 {p}，共出现 {count} 次")
-                        positions = np.where(pred_flat == p)[0]
-                        logger.info(f"异常类别 {p} 出现的位置索引：{positions[:10]}（仅显示前10个）")
-                        if len(self.y[test_signal_key]) >= len(pred_flat):
-                            true_labels = [self.y[test_signal_key][i] for i in positions if i < len(self.y[test_signal_key])]
-                            logger.info(f"异常类别位置对应的真实标签：{true_labels[:10]}（仅显示前10个）")
+                # 输出预测结果的原始信息（包括维度）
+                logger.info(f"预测结果原始形状: {np.shape(y_pred_segment)}, 维度: {y_pred_segment.ndim}")
+                
+                # 修复展平逻辑：根据预测结果的实际维度动态处理
+                if self.manage_sequences:
+                    # 情况1：如果是二维数组且第一维为1（如(1, 294)），则取第一个元素后展平
+                    if y_pred_segment.ndim == 2 and y_pred_segment.shape[0] == 1:
+                        y_pred_segment_flat = np.ravel(y_pred_segment[0])
+                    # 情况2：如果是一维数组（如(294,)），直接展平
+                    elif y_pred_segment.ndim == 1:
+                        y_pred_segment_flat = np.ravel(y_pred_segment)
+                    # 其他异常情况：强制展平并报警
+                    else:
+                        logger.warning(f"预测结果维度异常（{y_pred_segment.ndim}维），强制展平")
+                        y_pred_segment_flat = np.ravel(y_pred_segment)
+                else:
+                    y_pred_segment_flat = y_pred_segment.flatten()
+
+                # 输出展平后的形状和长度
+                logger.info(f"展平后预测结果形状: {np.shape(y_pred_segment_flat)}, 长度: {len(y_pred_segment_flat)}")
+
+                # 打印当前片段的真实标签和预测结果长度
+                logger.info(f"片段 {test_signal_key}：真实标签数={len(y_test_segment)}, 预测结果数={len(y_pred_segment_flat)}")
+
+                # 记录预测窗口数
+                pred_window_count = len(y_pred_segment_flat)
+                logger.info(f"测试样本 {test_signal_key} 预测窗口数: {pred_window_count}")
+                
+                # 收集到当前折的列表
+                y_true_all.extend(y_test_segment)
+                y_pred_all.extend(y_pred_segment_flat)
 
                 # 逆编码预测结果
-                if self.manage_sequences:
-                    y_signal_pred = np.ravel(y_signal_pred[0])
-                logger.info(f"test_signal_key: {test_signal_key}, y_signal_pred形状: {y_signal_pred.shape}, 类型: {type(y_signal_pred)}")
-                y_signal_pred_labels = self.target_encoder.inverse_transform(y_signal_pred)
+                y_signal_pred_labels = self.target_encoder.inverse_transform(y_pred_segment_flat)
 
-                # 保存预测结果
-                y_test = self.y[test_signal_key]
-                signal_predictions[test_signal_key] = [y_test, y_signal_pred_labels]
+                # 保存预测结果时记录真实标签窗口数
+                true_window_count = len(y_test_segment)
+                logger.info(f"测试样本 {test_signal_key} 真实标签窗口数: {true_window_count}")
+                current_fold_predictions[test_signal_key] = [y_test_segment, y_signal_pred_labels]
+
+            # 打印当前折的总真实标签和预测结果数量
+            logger.info(f"折 {ix_fold} 总统计：真实标签总数={len(y_true_all)}, 预测结果总数={len(y_pred_all)}")
+
+            # 每折结束后保存当前折的结果（使用修改后的save_predictions）
+            self.save_predictions(current_fold_predictions, ix_fold)
 
             # 每折结束释放资源
             logger.info(f"折 {ix_fold} 训练/测试完成，开始释放资源...")
@@ -401,58 +453,107 @@ class Experiment:
                 logger.warning(f"重置GPU内存统计失败：{e}")
             logger.info(f"折 {ix_fold} 资源释放完成\n")
 
-        # 评估与保存结果
+        # 评估结果
         logger.info('-' * 25)
         logger.info('Fold iterations finished !. Starting evaluation phase.')
-        self.save_predictions(signal_predictions)
 
         unique_labels = list(set(np.concatenate([self.y[k] for k in self.y.keys()])))
         if self.no_event_class in unique_labels:
             unique_labels.remove(self.no_event_class)
 
         if is_grid_search:
-            fold_metrics = self.evaluate(unique_labels=unique_labels, folds=folds, verbose=False)
+            fold_metrics_result = self.evaluate(unique_labels=unique_labels, folds=folds, verbose=False)
         else:
             logger.info('-' * 50)
             logger.info('***** Classification results *****')
-            fold_metrics = self.evaluate(unique_labels=unique_labels, folds=folds, verbose=True)
+            fold_metrics_result = self.evaluate(unique_labels=unique_labels, folds=folds, verbose=True)
 
-        return fold_metrics
+        return fold_metrics_result
 
-    def save_predictions(self, fold_labels_predictions):
-        ''' 保存预测结果并转换为事件格式 '''
+    def save_predictions(self, fold_labels_predictions, fold_ix):
+        '''保存预测结果，将真实标签和预测结果统一调整到训练集最大窗口长度'''
+        # 为每个折创建单独的目录
+        fold_path = os.path.join(self.path, f'fold_{fold_ix}')
+        os.makedirs(fold_path, exist_ok=True)
+        
+        # 验证当前折的样本数量
+        expected = 12 if fold_ix == '5' else 10
+        actual = len(fold_labels_predictions)
+        logger.info(f"折 {fold_ix} 进入窗口转换的样本数: {actual}，预期: {expected}")
+        if actual != expected:
+            logger.warning(f"折 {fold_ix} 样本数异常：{actual}（预期{expected}）")
+
         df = pd.DataFrame(columns=['segment', 'y_true', 'y_pred'])
-
         for segment in fold_labels_predictions.keys():
             y_true = fold_labels_predictions[segment][0]
             y_pred = fold_labels_predictions[segment][1]
+            target_length = self.max_window_length
 
-            # 保存标签与预测的DataFrame
+            # 1. 若未计算出最大长度，则退化为截断到最短（避免报错）
+            if target_length == 0:
+                target_length = min(len(y_true), len(y_pred))
+                logger.warning(f"未找到训练集最大窗口长度，使用当前样本最短长度: {target_length}")
+
+            # 2. 调整真实标签长度到目标长度
+            if len(y_true) > target_length:
+                y_true = y_true[:target_length]  # 截断过长
+                logger.info(f"片段 {segment} 真实标签过长，截断到 {target_length}（原长度{len(y_true)}）")
+            elif len(y_true) < target_length:
+                # 填充no-event到目标长度
+                pad_length = target_length - len(y_true)
+                y_true = np.pad(y_true, (0, pad_length), 
+                                mode='constant', 
+                                constant_values=self.no_event_class)
+                logger.info(f"片段 {segment} 真实标签过短，填充到 {target_length}（原长度{len(y_true)-pad_length}）")
+
+            # 3. 调整预测结果长度到目标长度（与真实标签保持一致）
+            if len(y_pred) > target_length:
+                y_pred = y_pred[:target_length]  # 截断过长
+                logger.info(f"片段 {segment} 预测结果过长，截断到 {target_length}（原长度{len(y_pred)}）")
+            elif len(y_pred) < target_length:
+                # 填充no-event到目标长度
+                pad_length = target_length - len(y_pred)
+                y_pred = np.pad(y_pred, (0, pad_length), 
+                                mode='constant', 
+                                constant_values=self.no_event_class)
+                logger.info(f"片段 {segment} 预测结果过短，填充到 {target_length}（原长度{len(y_pred)-pad_length}）")
+
+            # 4. 验证长度一致性
+            assert len(y_true) == len(y_pred) == target_length, \
+                f"片段 {segment} 调整后长度不一致: 真实标签{len(y_true)} vs 预测结果{len(y_pred)}（目标{target_length}）"
+
+            # 5. 保存到DataFrame
             _df = pd.DataFrame({'y_true': y_true, 'y_pred': y_pred})
             _df['segment'] = segment
             df = pd.concat([df, _df], ignore_index=True)
 
-            # 转换窗口为事件并保存
+            # 6. 转换窗口为事件并保存
+            logger.info(f"样本 {segment} - 开始真实标签窗口转事件")
             df_labels = windows2events(y_true, self.window_width, self.window_overlap)
             df_labels = df_labels[df_labels.label != self.no_event_class]
-            df_labels.to_csv(os.path.join(self.path, f'{segment}_true.txt'),
+            df_labels.to_csv(os.path.join(fold_path, f'{segment}_true.txt'),
                              sep='\t', header=False, index=False)
 
+            logger.info(f"样本 {segment} - 开始预测结果窗口转事件")
             df_predictions = windows2events(y_pred, self.window_width, self.window_overlap)
             df_predictions = df_predictions[df_predictions.label != self.no_event_class]
-            df_predictions.to_csv(os.path.join(self.path, f'{segment}_pred.txt'),
+            df_predictions.to_csv(os.path.join(fold_path, f'{segment}_pred.txt'),
                                   sep='\t', header=False, index=False)
 
-        df.to_csv(os.path.join(self.path, 'fold_labels_and_predictions.csv'), index=False)
+        df.to_csv(os.path.join(fold_path, 'fold_labels_and_predictions.csv'), index=False)
+        logger.info(f"折 {fold_ix} 预测结果已保存到: {fold_path}")
 
     def evaluate(self, unique_labels, folds, verbose=True):
         ''' 评估模型性能 '''
-        target_files = glob(os.path.join(self.path, 'recording_*_true.txt'))
         final_metric = 'f_measure'
         fold_metrics_detail = {}
         fold_metrics = []
 
         for ix_fold, fold in folds.items():
+            # 从当前折的目录中获取文件
+            fold_path = os.path.join(self.path, f'fold_{ix_fold}')
+            target_files = glob(os.path.join(fold_path, 'recording_*_true.txt'))
+            
             file_list = []
             fold_files = [f for f in target_files if int(os.path.basename(f).split('_')[1]) in fold]
             for file in fold_files:
@@ -488,12 +589,12 @@ class Experiment:
                     estimated_event_list=file_pair['estimated_event_list']
                 )
 
-            # 保存指标
+            # 保存指标到当前折的目录
             metrics = {
                 'segment_based_metrics': segment_based_metrics,
                 'event_based_metrics': event_based_metrics
             }
-            with open(os.path.join(self.path, f'experiment_metrics_fold_{ix_fold}.pkl'), 'wb') as handle:
+            with open(os.path.join(fold_path, f'experiment_metrics_fold_{ix_fold}.pkl'), 'wb') as handle:
                 pickle.dump(metrics, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
             # 提取指标结果

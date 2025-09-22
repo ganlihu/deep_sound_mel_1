@@ -569,14 +569,15 @@ class DeepSoundBaseRNN:
             ]
             self.nan_detector.check_nan(X, "统一维度后的X")
             
-            # 计算最大序列长度
+            # 计算训练集最大序列长度（核心：明确基于训练样本shape计算）
             if isinstance(X, (list, np.ndarray)):
-                self.max_seq_len = max(len(sample) for sample in X) if X else 0
-                self.resource_logger.log(f"当前批次最长序列长度（窗口数）: {self.max_seq_len}")
+                # 从训练样本shape中提取序列长度（每个样本的第0维）
+                self.max_seq_len = max(sample.shape[0] for sample in X) if X else 0
+                self.resource_logger.log(f"基于训练样本shape计算的最大序列长度（窗口数）: {self.max_seq_len}")
             else:
                 raise ValueError("X必须是列表或NumPy数组")
 
-            # 同步填充X和y（均在末尾填充）
+            # 同步填充/截断X和y（均在末尾处理）
             target_len = self.max_seq_len
             X_padded: List[np.ndarray] = []
             for sample in X:
@@ -593,14 +594,18 @@ class DeepSoundBaseRNN:
                         pad_width = ((0, 0), (0, self.input_size - feat_dim))
                         sample = np.pad(sample, pad_width, mode='constant', constant_values=0.0)
                 
-                # 填充窗口数维度（右填-1.0，与y填充位置一致）
-                padded = keras.preprocessing.sequence.pad_sequences(
-                    sample.T,
-                    maxlen=target_len,
-                    padding='post',
-                    value=-1.0,
-                    dtype='float32'
-                ).T
+                # 核心修改：对训练样本同时支持填充和截断
+                if seq_len < target_len:
+                    # 短序列：填充（右填-1.0）
+                    pad_length = target_len - seq_len
+                    padded = np.pad(sample, pad_width=((0, pad_length), (0, 0)),
+                                   mode='constant', constant_values=-1.0)
+                    self.resource_logger.log(f"训练样本序列较短（{seq_len} < {target_len}），填充{pad_length}个窗口")
+                else:
+                    # 长序列：截断（保留前target_len个窗口）
+                    padded = sample[:target_len, :]
+                    self.resource_logger.log(f"训练样本序列较长（{seq_len} > {target_len}），截断至{target_len}个窗口")
+                
                 X_padded.append(padded)
             
             # 转换为数组
@@ -629,16 +634,21 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"训练标签中的类别: {self.classes_}")
             self.resource_logger.log(f"填充类别编号（padding_class）: {self.padding_class}")
             
-            # 填充标签（与X同步在末尾填充）
-            y_padded = keras.preprocessing.sequence.pad_sequences(
-                y,
-                maxlen=target_len,
-                padding='post',
-                value=self.padding_class,
-                dtype='int32'
-            )
-            y = y_padded
-            self.resource_logger.log(f"y填充后形状: {y.shape}")
+            # 填充/截断标签（与X同步处理）
+            y_padded = []
+            for label_seq in y:
+                seq_len = len(label_seq)
+                if seq_len < target_len:
+                    # 短序列：填充
+                    pad_length = target_len - seq_len
+                    padded = np.pad(label_seq, pad_width=(0, pad_length),
+                                   mode='constant', constant_values=self.padding_class)
+                else:
+                    # 长序列：截断
+                    padded = label_seq[:target_len]
+                y_padded.append(padded)
+            y = np.array(y_padded, dtype='int32')
+            self.resource_logger.log(f"y填充/截断后形状: {y.shape}")
             self.nan_detector.check_nan(y, "y填充后的数据")
 
             # 处理X的填充值（替换为均值）
@@ -819,9 +829,9 @@ class DeepSoundBaseRNN:
             pred_detector.check_nan(X, "预测：统一维度后")
             self.resource_logger.log(f"统一维度后样本形状列表: {[s.shape for s in X]}")
             
-            # 填充到训练时的最大序列长度
+            # 填充/截断到训练时的最大序列长度（核心修改：预测阶段同样支持截断）
             X_padded: List[np.ndarray] = []
-            for sample in X:
+            for i, sample in enumerate(X):
                 if sample.ndim != 2:
                     raise ValueError(f"预测样本必须是2维数组，实际形状: {sample.shape}")
                 
@@ -833,14 +843,19 @@ class DeepSoundBaseRNN:
                     else:
                         sample = np.pad(sample, ((0,0), (0, self.input_size-feat_dim)), mode='constant')
                 
-                # 填充窗口数维度（与训练时一致：右填-1.0）
-                padded = keras.preprocessing.sequence.pad_sequences(
-                    sample.T,
-                    maxlen=self.max_seq_len,  # 使用训练时的最大长度
-                    padding='post',           # 与训练时一致
-                    value=-1.0,               # 与训练时一致
-                    dtype='float32'
-                ).T
+                # 核心修改：对预测样本同时支持填充和截断
+                target_len = self.max_seq_len
+                if seq_len < target_len:
+                    # 短序列：填充（右填-1.0）
+                    pad_length = target_len - seq_len
+                    padded = np.pad(sample, pad_width=((0, pad_length), (0, 0)),
+                                   mode='constant', constant_values=-1.0)
+                    self.resource_logger.log(f"预测样本{i}序列较短（{seq_len} < {target_len}），填充{pad_length}个窗口")
+                else:
+                    # 长序列：截断（保留前target_len个窗口）
+                    padded = sample[:target_len, :]
+                    self.resource_logger.log(f"预测样本{i}序列较长（{seq_len} > {target_len}），截断至{target_len}个窗口")
+                
                 X_padded.append(padded)
             
             # 转换为数组并添加通道维度
@@ -864,6 +879,18 @@ class DeepSoundBaseRNN:
             self.resource_logger.log(f"预测输入形状: {X.shape}")
             assert self.model is not None, "模型未初始化，请先训练模型"
             y_pred_proba = self.model.predict(X, verbose=0)  # 概率形状：(样本数, 窗口数, 类别数)
+            
+            # 处理标签4的概率（置零并归一化）
+            if y_pred_proba.shape[-1] > 4:  # 确保存在标签4维度
+                # 将标签4的概率置为0
+                y_pred_proba[..., 4] = 0.0
+                # 计算每行的概率和（排除标签4）
+                row_sums = y_pred_proba.sum(axis=-1, keepdims=True)
+                # 避免除零错误（若所有概率都为0，保持为0）
+                row_sums[row_sums == 0] = 1.0
+                # 归一化剩余概率
+                y_pred_proba = y_pred_proba / row_sums
+            
             y_pred = y_pred_proba.argmax(axis=-1)  # 取概率最大的标签
 
             # 打印预测概率与标签（前3个样本的前5个窗口）
@@ -876,16 +903,21 @@ class DeepSoundBaseRNN:
             
             self.resource_logger.log(f"模型原始预测输出形状: {y_pred.shape}")
             
-            # 根据原始长度裁剪，去除填充部分
+            # 根据原始长度裁剪，去除填充部分（核心：截断后预测长度≤原始长度）
             trimmed_preds = []
             for i in range(len(y_pred)):
                 real_len = pred_original_lengths[i]  # 使用预测样本的原始长度
-                trimmed = y_pred[i, :real_len]  # 仅保留真实音频部分
+                # 裁剪长度取"原始长度"和"模型输出长度"的最小值（避免超出）
+                clip_len = min(real_len, y_pred.shape[1])
+                trimmed = y_pred[i, :clip_len]  # 仅保留真实音频部分
                 
                 # 打印裁剪前后的标签对比
                 self.resource_logger.log(f"样本{i} - 裁剪前标签（最后5个窗口，可能含填充）: {y_pred[i, -5:]}")
-                self.resource_logger.log(f"样本{i} - 裁剪后标签（实际窗口，长度{real_len}）: {trimmed[-5:] if len(trimmed)>=5 else trimmed}")
+                self.resource_logger.log(f"样本{i} - 裁剪后标签（实际窗口，长度{clip_len}）: {trimmed[-5:] if len(trimmed)>=5 else trimmed}")
                 
+                # 校验：确保裁剪后的预测长度与原始长度一致（或截断后的合理长度）
+                if clip_len != real_len:
+                    self.resource_logger.log(f"警告：样本{i}原始长度{real_len} > 模型最大序列长度{self.max_seq_len}，预测结果已截断至{clip_len}个窗口")
                 trimmed_preds.append(trimmed)
             
             # 聚合序列结果（每个样本返回一个标签）
@@ -983,9 +1015,9 @@ class DeepSoundBaseRNN:
             ]
             pred_detector.check_nan(X, "预测概率：统一维度后")
             
-            # 填充到训练时的最大序列长度
+            # 填充/截断到训练时的最大序列长度（核心修改：预测概率同样支持截断）
             X_padded: List[np.ndarray] = []
-            for sample in X:
+            for i, sample in enumerate(X):
                 if sample.ndim != 2:
                     raise ValueError(f"预测概率样本必须是2维数组，实际形状: {sample.shape}")
                 
@@ -996,13 +1028,19 @@ class DeepSoundBaseRNN:
                     else:
                         sample = np.pad(sample, ((0,0), (0, self.input_size-feat_dim)), mode='constant')
                 
-                padded = keras.preprocessing.sequence.pad_sequences(
-                    sample.T,
-                    maxlen=self.max_seq_len,
-                    padding='post',
-                    value=-1.0,
-                    dtype='float32'
-                ).T
+                # 核心修改：对预测概率样本同时支持填充和截断
+                target_len = self.max_seq_len
+                if seq_len < target_len:
+                    # 短序列：填充
+                    pad_length = target_len - seq_len
+                    padded = np.pad(sample, pad_width=((0, pad_length), (0, 0)),
+                                   mode='constant', constant_values=-1.0)
+                    self.resource_logger.log(f"预测概率样本{i}序列较短（{seq_len} < {target_len}），填充{pad_length}个窗口")
+                else:
+                    # 长序列：截断
+                    padded = sample[:target_len, :]
+                    self.resource_logger.log(f"预测概率样本{i}序列较长（{seq_len} > {target_len}），截断至{target_len}个窗口")
+                
                 X_padded.append(padded)
             
             # 转换为数组并添加通道维度
@@ -1026,14 +1064,29 @@ class DeepSoundBaseRNN:
             assert self.model is not None, "模型未初始化，请先训练模型"
             y_pred_proba = self.model.predict(X, verbose=0)
             
+            # 处理标签4的概率（置零并归一化）
+            if y_pred_proba.shape[-1] > 4:  # 确保存在标签4维度
+                # 将标签4的概率置为0
+                y_pred_proba[..., 4] = 0.0
+                # 计算每行的概率和（排除标签4）
+                row_sums = y_pred_proba.sum(axis=-1, keepdims=True)
+                # 避免除零错误（若所有概率都为0，保持为0）
+                row_sums[row_sums == 0] = 1.0
+                # 归一化剩余概率
+                y_pred_proba = y_pred_proba / row_sums
+            
             # 根据原始长度裁剪，去除填充部分
             trimmed_probs = []
             for i in range(len(y_pred_proba)):
                 real_len = pred_original_lengths[i]
-                trimmed = y_pred_proba[i, :real_len, :]  # 仅保留真实音频部分的概率
+                # 裁剪长度取最小值，避免超出
+                clip_len = min(real_len, y_pred_proba.shape[1])
+                trimmed = y_pred_proba[i, :clip_len, :]  # 仅保留真实音频部分的概率
+                if clip_len != real_len:
+                    self.resource_logger.log(f"警告：样本{i}原始长度{real_len} > 模型最大序列长度{self.max_seq_len}，概率结果已截断至{clip_len}个窗口")
                 trimmed_probs.append(trimmed)
             
-            self.resource_logger.log(f"预测概率完成，裁剪后结果数量: {len(trimmed_probs)}，均为原始音频长度")
+            self.resource_logger.log(f"预测概率完成，裁剪后结果数量: {len(trimmed_probs)}，均为原始音频长度（或截断后长度）")
             return trimmed_probs if len(trimmed_probs) > 1 else trimmed_probs[0]
         except Exception as e:
             self.resource_logger.log(f"预测概率过程出错: {str(e)}")
