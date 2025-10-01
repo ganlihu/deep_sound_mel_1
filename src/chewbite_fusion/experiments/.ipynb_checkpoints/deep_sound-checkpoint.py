@@ -1,7 +1,3 @@
-import os
-# 设置可见GPU设备（需在导入tensorflow前执行）
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
-
 import logging
 import tensorflow as tf  # 新增：导入TensorFlow
 from chewbite_fusion.models.deep_sound import DeepSound
@@ -17,15 +13,13 @@ logger = logging.getLogger('yaer')
 
 
 def get_model_instance(variable_params):
-    # 核心修改：适配多GPU，按GPU数量调整批次大小（3个GPU × 单卡基础批次5）
+    # 核心修改：移除不被DeepSound接受的training_reshape参数，减小批次大小以降低显存占用
     return DeepSound(input_size=1800,
                      output_size=5,
-                     n_epochs=1,
-                     batch_size=9,  # 多GPU批次调整：3×5=15
+                     n_epochs=100,
+                     batch_size=10,  # 重点调整：降低批次大小
                      set_sample_weights=True,
-                     feature_scaling=True,
-                     gpus=[0, 1, 2]  # 传递可用GPU列表
-                     )
+                     feature_scaling=True)
 
 
 @experiment()
