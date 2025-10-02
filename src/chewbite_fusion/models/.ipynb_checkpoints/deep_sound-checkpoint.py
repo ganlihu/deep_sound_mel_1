@@ -502,7 +502,11 @@ class DeepSoundBaseRNN:
         ])
 
         model.compile(
-            optimizer=Adagrad(),
+            optimizer=Adam(
+                learning_rate=1e-3,
+                clipnorm=1.0,
+                clipvalue=0.5
+            ),
             loss='sparse_categorical_crossentropy',
             weighted_metrics=['accuracy']
         )
