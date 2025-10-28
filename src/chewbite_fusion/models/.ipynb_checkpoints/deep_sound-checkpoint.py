@@ -469,7 +469,7 @@ class DeepSoundBaseRNN:
 
         cnn.add(layers.MaxPooling1D(4, name='max_pooling1d'))
         cnn.add(layers.Flatten(name='flatten'))
-        cnn.add(layers.Dropout(rate=0.2, name='cnn_output_dropout'))
+        cnn.add(layers.Dropout(rate=0.3, name='cnn_output_dropout'))
 
         # 核心修改2：减少FFN维度，降低参数数量
         ffn = Sequential(name='ffn_subnetwork')
@@ -493,8 +493,8 @@ class DeepSoundBaseRNN:
                 layers.GRU(128,  # 原128 -> 64
                            activation="tanh", 
                            return_sequences=True, 
-                           dropout=0.2,
-                           recurrent_dropout=0.2,
+                           dropout=0.3,
+                           recurrent_dropout=0.3,
                            kernel_initializer=HeUniform()),
                 name='bidirectional_gru'
             ),

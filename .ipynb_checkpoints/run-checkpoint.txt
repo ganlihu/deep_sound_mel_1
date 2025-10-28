@@ -1,0 +1,3 @@
+/opt/conda/envs/new-deepsound/bin/python3.10 /opt/conda/envs/new-deepsound/bin/yaer run -e deep_sound_mel -d
+cd /src/chewbite_fusion/
+推送github

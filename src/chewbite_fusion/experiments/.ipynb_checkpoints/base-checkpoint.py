@@ -158,12 +158,17 @@ class Experiment:
 
             # 折叠划分（基于反刍片段的分层随机抽样）
             folds = {
-                '1': [40, 41, 7, 37, 26, 24, 17, 48, 21, 5],
-                '2': [33, 52, 23, 4, 15, 36, 49, 18, 28, 50],
-                '3': [35, 27, 44, 20, 9, 51, 31, 3, 16, 42],
-                '4': [22, 39, 32, 45, 34, 2, 8, 30, 29, 1],
-                '5': [19, 10, 6, 43, 47, 13, 11, 14, 12, 38, 25, 46]
-            }
+                '1': [40, 41, 7, 37, 26],
+                '2': [24, 17, 48, 21, 5],
+                '3': [33, 52, 23, 4, 15],
+                '4': [36, 49, 18, 28, 50],
+                '5': [35, 27, 44, 20, 9],
+                '6': [51, 31, 3, 16, 42],
+                '7': [22, 39, 32, 45, 34],
+                '8': [2, 8, 30, 29, 1],
+                '9': [19, 10, 6, 43, 47, 13],
+                '10': [11, 14, 12, 38, 25, 46]
+        }
 
             self.train_validation_segments = [seg for fold in folds.values() for seg in fold]
             # 计算训练集最大窗口长度（关键新增步骤）
@@ -224,7 +229,8 @@ class Experiment:
         fold_metrics = []
         for ix_fold, fold in folds.items():
             logger.info('Running fold number %s.', ix_fold)
-
+            total_folds = len(folds)
+            logger.info(f'当前训练折数：{ix_fold}/{total_folds}')
             # 划分训练/测试片段
             test_fold_keys = [k for k in self.X.keys() if int(k.split('_')[1]) in fold]
             train_fold_keys = [k for k in self.X.keys() if int(k.split('_')[1]) not in fold]

@@ -6,6 +6,8 @@ from chewbite_fusion.features import audio_statistical_based_features as asf
 from chewbite_fusion.features import audio_cbia_based_features as cbia
 from chewbite_fusion.features import audio_cbia_based_features_seq as cbia_seq
 from chewbite_fusion.features import audio_raw_data as ard
+# 在现有导入后添加
+from chewbite_fusion.features import audio_mel_spectrogram as ams  # 新增
 
 
 class BaseFeatureFactory():
@@ -440,3 +442,38 @@ class FeatureFactory_AudioAccRawData(BaseFeatureFactoryNoPreprocessing):
         super().__init__(features,
                          audio_sampling_frequency,
                          movement_sampling_frequency)
+
+        
+        
+# 新增：仅提取梅尔频谱特征的工厂类
+class FeatureFactory_MelSpectrogram(BaseFeatureFactoryNoPreprocessing):
+    def __init__(self, audio_sampling_frequency, movement_sampling_frequency):
+        features = [
+            ams.AudioMelSpectrogram  # 使用梅尔频谱特征类
+        ]
+        super().__init__(features,
+                         audio_sampling_frequency,
+                         movement_sampling_frequency)
+
+
+# 新增：融合原始音频和梅尔频谱的工厂类
+class FeatureFactory_AudioMelFusion(BaseFeatureFactoryNoPreprocessing):
+    def __init__(self, audio_sampling_frequency, movement_sampling_frequency):
+        features = [
+            ard.AudioRawData,  # 原始音频特征（已有的类）
+            ams.AudioMelSpectrogram  # 梅尔频谱特征（新增的类）
+        ]
+        super().__init__(features,
+                         audio_sampling_frequency,
+                         movement_sampling_frequency)
+
+        
+# 在 deep-sound-38/src/chewbite_fusion/features/feature_factories.py 中添加
+class FeatureFactory_AudioMelFusion(BaseFeatureFactoryNoPreprocessing):
+    def __init__(self, audio_sampling_frequency, movement_sampling_frequency):
+        # 同时包含原始音频和梅尔频谱特征
+        features = [
+            ard.AudioRawData,  # 原始音频（1D）
+            ams.AudioMelSpectrogram  # 梅尔频谱（2D，需确保该类已实现）
+        ]
+        super().__init__(features, audio_sampling_frequency, movement_sampling_frequency)
